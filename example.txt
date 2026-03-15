@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DATA=$(cat)
+
+# ── Extract fields ──────────────────────────────────────────────────────────
+IFS=$'\t' read -r MODEL MODEL_ID DIR PCT CTX_SIZE DURATION_MS AGENT MODE < <(
+    echo "$DATA" | jq -r '[
+        (.model.display_name // "Claude"),
+        (try (.model.id // "unknown") catch "unknown"),
+        (.cwd // "~" | split("/") | last),
+        (try (
+            if (.context_window.remaining_percentage // null) != null then
+                100 - (.context_window.remaining_percentage | floor)
+            elif (.context_window.context_window_size // 0) > 0 then
+                (((.context_window.current_usage.input_tokens // 0) +
+                  (.context_window.current_usage.cache_creation_input_tokens // 0) +
+                  (.context_window.current_usage.cache_read_input_tokens // 0)) * 100 /
+                 .context_window.context_window_size) | floor
+            else 0 end
+        ) catch 0),
+        (.context_window.context_window_size // 200000),
+        (.cost.total_duration_ms // 0),
+        (.agent.name // ""),
+        (.mode // "")
+    ] | @tsv'
+)
+CTX_SIZE_K=$((CTX_SIZE / 1000))
+COLS=$(tput cols 2>/dev/null || echo 120)
+
+TOPIC=""  # populated after SESSION_ID is extracted below
+
+# ── Nerd Font icons ───────────────────────────────────────────────────────
+NF_GIT=$'\xee\x82\xa0'       # U+E0A0 powerline branch
+NF_FOLDER=$'\xef\x81\xbb'    # U+F07B folder
+NF_CLOCK=$'\xef\x80\x97'     # U+F017 clock
+NF_LROUND=$'\xee\x82\xb6'    # U+E0B6 left rounded (fills right half with fg)
+NF_RROUND=$'\xee\x82\xb4'    # U+E0B4 right rounded (fills left half with fg)
+NF_RSEP=$'\xee\x82\xb0'      # U+E0B0 right arrow (section transition: fg=old, bg=new)
+NF_RSEP_OUTLINE=$'\xee\x82\xb1' # U+E0B1 right arrow outline (same-color transition)
+NF_CORNER_TL=$'\xee\x82\xba'    # U+E0BA lower-right fill → top-left corner cut (line 1 start)
+NF_CORNER_BL=$'\xee\x82\xbe'    # U+E0BE upper-right fill → bottom-left corner cut (line 2 start)
+NF_CORNER_TR=$'\xee\x82\xb8'    # U+E0B8 lower-left fill → top-right corner cut (line 1 end)
+NF_CORNER_BR=$'\xee\x82\xbc'    # U+E0BC upper-left fill → bottom-right corner cut (line 2 end)
+NF_HALF_L=$'\xe2\x96\x8c'       # U+258C left half block (straight divider: fg=left color, bg=right color)
+
+# ── Project-colored background (hash CWD → unique hue per project) ────────
+RST="\033[0m"
+CWD_FULL=$(echo "$DATA" | jq -r '.cwd // "~"')
+PROJECT_ROOT=$(git -C "$CWD_FULL" rev-parse --show-toplevel 2>/dev/null || echo "$CWD_FULL")
+SESSION_ID=$(echo "$DATA" | jq -r '.session_id // empty' 2>/dev/null)
+PHASH=$(printf '%s' "${SESSION_ID:-$CWD_FULL}" | cksum | cut -d' ' -f1)
+
+# ── Session topic ─────────────────────────────────────────────────────────────
+if [ -n "${SESSION_ID:-}" ]; then
+    TOPIC_FILE="$HOME/.claude/session-topics/${SESSION_ID}.txt"
+    [ -f "$TOPIC_FILE" ] && TOPIC=$(cat "$TOPIC_FILE" 2>/dev/null | tr -d '\n' | cut -c1-40)
+fi
+
+# Check for manual color override (set via /qq-change-color)
+COLOR_OVERRIDES="$HOME/.claude/statusline-color-overrides.json"
+if [ -f "$COLOR_OVERRIDES" ]; then
+    COLOR_IDX=$(jq -r --arg p "$PROJECT_ROOT" '.[$p] // empty' "$COLOR_OVERRIDES" 2>/dev/null)
+fi
+COLOR_IDX=${COLOR_IDX:-$((PHASH % 12))}
+
+case $COLOR_IDX in
+    0)  BG_R=105; BG_G=145; BG_B=225 ;;  # blue
+    1)  BG_R=130; BG_G=190; BG_B=130 ;;  # green
+    2)  BG_R=190; BG_G=130; BG_B=175 ;;  # pink
+    3)  BG_R=200; BG_G=170; BG_B=100 ;;  # amber
+    4)  BG_R=100; BG_G=185; BG_B=185 ;;  # teal
+    5)  BG_R=175; BG_G=130; BG_B=190 ;;  # purple
+    6)  BG_R=110; BG_G=170; BG_B=210 ;;  # sky
+    7)  BG_R=180; BG_G=190; BG_B=110 ;;  # olive
+    8)  BG_R=200; BG_G=140; BG_B=130 ;;  # coral
+    9)  BG_R=130; BG_G=170; BG_B=180 ;;  # steel
+    10) BG_R=190; BG_G=175; BG_B=120 ;;  # khaki
+    11) BG_R=160; BG_G=130; BG_B=190 ;;  # violet
+    *)  BG_R=105; BG_G=145; BG_B=225 ;;  # fallback: blue
+esac
+
+# Line 1 colors (derived from project palette)
+SEP_R=$((BG_R * 40 / 100)); SEP_G=$((BG_G * 40 / 100)); SEP_B=$((BG_B * 40 / 100))
+TXT_R=$((BG_R * 15 / 100)); TXT_G=$((BG_G * 15 / 100)); TXT_B=$((BG_B * 15 / 100))
+
+BG1="\033[48;2;${BG_R};${BG_G};${BG_B}m"
+B="${RST}${BG1}"
+SEP="\033[38;2;${SEP_R};${SEP_G};${SEP_B}m│"
+TXT_FG="\033[38;2;${TXT_R};${TXT_G};${TXT_B}m"
+TXT_BOLD="\033[38;2;${TXT_R};${TXT_G};${TXT_B};1m"
+PROJ_FG="\033[38;2;${BG_R};${BG_G};${BG_B}m"
+
+# ── Line 2 colors (black fill, light gray text, colored % numbers) ──────────
+BG2="\033[48;2;0;0;0m"
+B2="${RST}${BG2}"
+L2_TXT="\033[38;2;170;170;170m"   # light gray
+L2_DIM="\033[38;2;80;80;80m"      # dim gray for separators + resets
+
+pct_txt_color() {
+    local p=$1
+    if   [ "$p" -gt 80 ]; then printf "\033[38;2;225;150;150m"   # coral
+    elif [ "$p" -gt 50 ]; then printf "\033[38;2;215;195;125m"   # gold
+    else                        printf "\033[38;2;150;210;150m"   # sage
+    fi
+}
+
+# ── Model tier ──────────────────────────────────────────────────────────────
+case "$MODEL_ID" in
+  *opus*)   TIER_ICON=$'\xee\xb5\xa2' ;;  # U+ED62 (Nerd Fonts v3+)
+  *sonnet*) TIER_ICON=$'\xee\xb8\xb4' ;;  # U+EE34
+  *haiku*)  TIER_ICON=$'\xee\x9f\x95' ;;  # U+E7D5
+  *)        TIER_ICON=$'\xef\x84\x91' ;;  # U+F111 filled circle
+esac
+
+# ── Git info ────────────────────────────────────────────────────────────────
+BRANCH=$(git -c core.useBuiltinFSMonitor=false branch --show-current 2>/dev/null || echo "")
+GIT_STATUS=""
+if [ -n "$BRANCH" ]; then
+  STAGED=$(git diff --cached --numstat 2>/dev/null | wc -l | tr -d " ")
+  MODIFIED=$(git diff --numstat 2>/dev/null | wc -l | tr -d " ")
+  UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d " ")
+  [ "$STAGED" -gt 0 ]    && GIT_STATUS="+${STAGED}"
+  [ "$MODIFIED" -gt 0 ]  && GIT_STATUS="${GIT_STATUS:+$GIT_STATUS }!${MODIFIED}"
+  [ "$UNTRACKED" -gt 0 ] && GIT_STATUS="${GIT_STATUS:+$GIT_STATUS }?${UNTRACKED}"
+fi
+
+# ── Session duration ────────────────────────────────────────────────────────
+TOTAL_SEC=$((DURATION_MS / 1000))
+H=$((TOTAL_SEC / 3600))
+M=$(((TOTAL_SEC % 3600) / 60))
+S=$((TOTAL_SEC % 60))
+if   [ "$H" -gt 0 ]; then TIME="${H}h${M}m"
+elif [ "$M" -gt 0 ]; then TIME="${M}m${S}s"
+else TIME="${S}s"
+fi
+
+# Color-code elapsed time: proxy for context deterioration risk
+if   [ "$H" -gt 2 ]; then TIME_CLR="\033[38;2;225;150;150m"   # coral: 3h+ = degrading
+elif [ "$H" -gt 0 ]; then TIME_CLR="\033[38;2;215;195;125m"   # gold: 1-3h = watch it
+else                      TIME_CLR="\033[38;2;150;210;150m"   # sage: <1h = fresh
+fi
+
+# ── Bar builder (▰▱, parameterized colors) ───────────────────────────────
+make_bar() {
+    local pct=$1 width=$2 fill_clr="$3" empty_clr="$4" bar=""
+    local filled=$((pct * width / 100))
+    [ "$pct" -gt 0 ] && [ "$filled" -eq 0 ] && filled=1
+    [ "$filled" -gt "$width" ] && filled=$width
+    local empty=$((width - filled))
+    for ((i=0; i<filled; i++)); do bar+="${fill_clr}▰"; done
+    for ((i=0; i<empty; i++));  do bar+="${empty_clr}▱"; done
+    printf "%b" "$bar"
+}
+
+# ── API rate limit helpers ──────────────────────────────────────────────────
+format_reset() {
+    local ts="$1"
+    [ -z "$ts" ] || [ "$ts" = "null" ] && return
+    local epoch now diff
+    epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${ts:0:19}" "+%s" 2>/dev/null) || return
+    now=$(date +%s)
+    diff=$((epoch - now))
+    [ "$diff" -le 0 ] && { printf "now"; return; }
+    [ "$diff" -lt 60 ] && { printf "<1m"; return; }
+    local d=$((diff / 86400)) h=$(((diff % 86400) / 3600)) m=$(((diff % 3600) / 60))
+    if   [ "$d" -gt 0 ]; then printf "%dd%dh" "$d" "$h"
+    elif [ "$h" -gt 0 ]; then printf "%dh%dm" "$h" "$m"
+    else printf "%dm" "$m"
+    fi
+}
+
+# ── Fetch API rate limits (60s async refresh; sync fallback if cache >5min stale) ──
+CACHE_FILE="/tmp/claude-usage-cache"
+CACHE_MAX_AGE=60
+CACHE_STALE_AGE=300  # force sync refresh if >5 min stale
+
+_get_token() {
+    # Try keychain first (native install), fall back to credentials.json
+    local creds token
+    creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null) && \
+        token=$(echo "$creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null) && \
+        [ -n "$token" ] && { echo "$token"; return; }
+    # Fallback: credentials file
+    token=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
+    [ -n "$token" ] && echo "$token"
+}
+
+_fetch_usage_sync() {
+    local token data
+    token=$(_get_token) || return
+    [ -z "${token:-}" ] && return
+    data=$(curl -s --max-time 4 \
+           -H "Authorization: Bearer $token" \
+           -H "anthropic-beta: oauth-2025-04-20" \
+           -H "Content-Type: application/json" \
+           -H "User-Agent: claude-code/2.1.4" \
+           -H "Accept: application/json" \
+           https://api.anthropic.com/api/oauth/usage 2>/dev/null)
+    if [ -n "$data" ] && echo "$data" | jq -e '.five_hour' >/dev/null 2>&1; then
+        echo "$data" > "${CACHE_FILE}.tmp" && mv "${CACHE_FILE}.tmp" "$CACHE_FILE"
+        echo "$data"
+    fi
+}
+
+get_usage() {
+    local age=9999
+    if [ -f "$CACHE_FILE" ]; then
+        age=$(($(date +%s) - $(stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)))
+        if [ "$age" -lt "$CACHE_MAX_AGE" ]; then
+            cat "$CACHE_FILE"; return
+        fi
+    fi
+    local token
+    token=$(_get_token 2>/dev/null) || true
+    if [ -n "${token:-}" ]; then
+        if [ "$age" -gt "$CACHE_STALE_AGE" ]; then
+            # Cache very stale — sync fetch (short timeout so statusline isn't too slow)
+            _fetch_usage_sync 2>/dev/null || true
+        else
+            # Cache slightly stale — async refresh, serve old data
+            ( data=$(curl -s --max-time 15 \
+                   -H "Authorization: Bearer $token" \
+                   -H "anthropic-beta: oauth-2025-04-20" \
+                   -H "Content-Type: application/json" \
+                   -H "User-Agent: claude-code/2.1.4" \
+                   -H "Accept: application/json" \
+                   https://api.anthropic.com/api/oauth/usage 2>/dev/null)
+              if [ -n "$data" ] && echo "$data" | jq -e '.five_hour' >/dev/null 2>&1; then
+                  echo "$data" > "${CACHE_FILE}.tmp" && mv "${CACHE_FILE}.tmp" "$CACHE_FILE"
+              fi
+            ) &
+            disown 2>/dev/null
+        fi
+    fi
+    [ -f "$CACHE_FILE" ] && cat "$CACHE_FILE"
+}
+
+USAGE_DATA=$(get_usage 2>/dev/null) || true
+
+# ── Count visible columns (strips ANSI, uses wc -m for correct UTF-8 char count)
+# BSD awk counts bytes not chars — wc -m is correct in a UTF-8 locale
+count_cols() {
+    local ESC=$'\033'
+    printf "%b" "$1" | sed "s/${ESC}\[[0-9;]*m//g" | tr -d '\n' | LC_ALL=en_US.UTF-8 wc -m | tr -d ' '
+}
+
+
+# ── Line 1 content (fill+corner appended after length matching) ───────────────
+L1C="${RST}${PROJ_FG}${NF_CORNER_TL}${BG1}"
+[ -n "$TOPIC" ] && L1C+=" ${TXT_BOLD}${TOPIC}${B} ${SEP}${B}"
+L1C+=" ${TXT_BOLD}${TIER_ICON}${B} ${TXT_BOLD}${MODEL}${B}"
+L1C+=" ${SEP}${B} ${TXT_FG}${NF_FOLDER} ${DIR} ${B}"
+if [ -n "$BRANCH" ]; then
+    L1C+=" ${SEP}${B} ${TXT_FG}${NF_GIT} ${BRANCH}${B}"
+    [ -n "$GIT_STATUS" ] && L1C+=" ${TXT_FG}${GIT_STATUS}${B}"
+fi
+[ -n "$AGENT" ] && L1C+=" ${TXT_FG}${AGENT}${B}"
+[ -n "$MODE" ]  && L1C+=" ${SEP}${B} \033[38;2;150;100;0;1m${MODE}${B}"
+L1C+=" "
+
+# ── Line 2 content (black fill, light gray text, colored %) ──────────────────
+CTX_CLR=$(pct_txt_color "$PCT")
+CTX_BAR=$(make_bar "$PCT" 10 "$CTX_CLR" "$L2_DIM")
+L2C="${RST}\033[38;2;0;0;0m${NF_CORNER_BL}${BG2} ${L2_TXT}${NF_CLOCK} ${TIME_CLR}${TIME}${B2} ${L2_DIM}│${B2} ${CTX_BAR} ${CTX_CLR}${PCT}%${B2} ${L2_TXT}of ${CTX_SIZE_K}k"
+
+if [ -n "${USAGE_DATA:-}" ]; then
+    FIVE_PCT=$(echo "$USAGE_DATA" | jq -r '.five_hour.utilization // empty' 2>/dev/null | cut -d. -f1) || true
+    SEVEN_PCT=$(echo "$USAGE_DATA" | jq -r '.seven_day.utilization // empty' 2>/dev/null | cut -d. -f1) || true
+    FIVE_RESET_TS=$(echo "$USAGE_DATA" | jq -r '.five_hour.resets_at // empty' 2>/dev/null) || true
+    SEVEN_RESET_TS=$(echo "$USAGE_DATA" | jq -r '.seven_day.resets_at // empty' 2>/dev/null) || true
+
+    if [ -n "${FIVE_PCT:-}" ] && [ -n "${SEVEN_PCT:-}" ]; then
+        FIVE_CLR=$(pct_txt_color "$FIVE_PCT")
+        FIVE_BAR=$(make_bar "$FIVE_PCT" 5 "$FIVE_CLR" "$L2_DIM")
+        FIVE_TIME=$(format_reset "$FIVE_RESET_TS")
+        L2C+=" ${L2_DIM}│${B2} ${L2_TXT}5h ${FIVE_BAR} ${FIVE_CLR}${FIVE_PCT}%${B2}"
+        [ -n "${FIVE_TIME:-}" ] && L2C+=" ${L2_DIM}${FIVE_TIME}${B2}"
+
+        SEVEN_CLR=$(pct_txt_color "$SEVEN_PCT")
+        SEVEN_BAR=$(make_bar "$SEVEN_PCT" 5 "$SEVEN_CLR" "$L2_DIM")
+        SEVEN_TIME=$(format_reset "$SEVEN_RESET_TS")
+        L2C+=" ${L2_DIM}│${B2} ${L2_TXT}7d ${SEVEN_BAR} ${SEVEN_CLR}${SEVEN_PCT}%${B2}"
+        [ -n "${SEVEN_TIME:-}" ] && L2C+=" ${L2_DIM}${SEVEN_TIME}${B2}"
+    fi
+fi
+L2C+=" "
+
+# ── Match line lengths: pad shorter line with its own bg color ────────────────
+L1_COLS=$(count_cols "$L1C")
+L2_COLS=$(count_cols "$L2C")
+if [ "${L1_COLS:-0}" -gt 0 ] && [ "${L2_COLS:-0}" -gt 0 ]; then
+    DIFF=$((L2_COLS - L1_COLS))
+    # Safety clamp: skip if delta > 60 (count was wrong) or negative already handled below
+    if [ "$DIFF" -gt 0 ] && [ "$DIFF" -le 60 ]; then
+        L1C+="${BG1}$(printf '%*s' "$DIFF" '')"
+    elif [ "$DIFF" -lt 0 ] && [ "$DIFF" -ge -60 ]; then
+        L2C+="${BG2}$(printf '%*s' "$((-DIFF))" '')"
+    fi
+fi
+
+# ── Set terminal tab title to session topic (synced with statusline) ─────────
+_TAB_TITLE="${TOPIC:-${DIR:-Claude}}"
+printf '\033]1;%s\007' "$_TAB_TITLE" > /dev/tty 2>/dev/null || true
+
+# ── Fill to terminal edge + diagonal corner cuts ──────────────────────────────
+L2_END_FG="\033[38;2;0;0;0m"
+echo -e "${L1C}\033[K\033[?7l\033[${COLS}G${RST}${PROJ_FG}${NF_CORNER_TR}\033[?7h"
+echo -e "${L2C}\033[K\033[?7l\033[${COLS}G${RST}${L2_END_FG}${NF_CORNER_BR}\033[?7h"
