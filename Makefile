@@ -1,14 +1,13 @@
 .PHONY: build install test clean
 
+BINARY := claude-statusline
+
 build:
 	cargo build --release
 
 install: build
-	cp target/release/claude-statusline ~/.claude/claude-statusline
-	@echo "Installed to ~/.claude/claude-statusline"
-	@echo ""
-	@echo "Add to your settings.json:"
-	@echo '  { "statusLine": { "type": "command", "command": "~/.claude/claude-statusline" } }'
+	cp target/release/$(BINARY) /usr/local/bin/$(BINARY)
+	@echo "Installed to /usr/local/bin/$(BINARY)"
 
 test: build
 	@bash test.sh

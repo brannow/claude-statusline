@@ -3,8 +3,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::platform;
 
-const CACHE_TTL_SECS: u64 = 60;
-const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
+const CACHE_TTL_SECS: u64 = 120;
+const CACHE_STALE_MAX_SECS: u64 = 300; // serve stale up to 5min, then force sync refresh
+const FETCH_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Parsed usage limits from the Anthropic API.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -15,33 +16,71 @@ pub struct UsageLimits {
     pub seven_day_resets_at: String,
 }
 
-/// Try to get usage limits: cache first, then API fetch with timeout.
-/// Returns None silently on any failure — statusline must never block.
+/// Three-tier cache strategy (matches bash example.sh approach):
+///  1. Cache fresh (< 60s)        → serve immediately, no API call
+///  2. Cache stale (60s–300s)      → serve stale + fire-and-forget bg refresh
+///  3. Cache very stale (>300s)    → sync fetch with timeout, fallback to stale
+///     or missing
 pub fn get_usage_limits(transcript_path: &str) -> Option<UsageLimits> {
     let path = Path::new(transcript_path);
 
-    // Cache hit?
-    if let Some(cached) = read_cache(path, false) {
-        return Some(cached);
+    // Check cache age
+    return match read_cache_age(path) {
+        // Tier 1: fresh cache — serve immediately
+        Some((data, age)) if age < CACHE_TTL_SECS => {
+            Some(data)
+        }
+        // Tier 2: stale but usable — serve stale, refresh in background
+        Some((data, age)) if age < CACHE_STALE_MAX_SECS => {
+            spawn_bg_refresh(path);
+            Some(data)
+        }
+        // Tier 3: very stale — we have data but it's old, try sync refresh
+        Some((stale_data, _)) => {
+            sync_fetch_or(path, Some(stale_data))
+        }
+        // Tier 3: no cache at all — must sync fetch
+        None => {
+            sync_fetch_or(path, None)
+        }
     }
+}
 
-    // Get OAuth token
-    let token = platform::get_oauth_token().ok()?;
+/// Sync fetch with timeout. Returns fallback on failure.
+fn sync_fetch_or(transcript_path: &Path, fallback: Option<UsageLimits>) -> Option<UsageLimits> {
+    let token = match platform::get_oauth_token().ok() {
+        Some(t) => t,
+        None => return fallback,
+    };
 
-    // Fetch with timeout — spawn thread, wait up to 2s
     let (tx, rx) = std::sync::mpsc::channel();
+    let path_owned = transcript_path.to_path_buf();
     std::thread::spawn(move || {
-        let _ = tx.send(fetch_usage_limits(&token));
+        let result = fetch_usage_limits(&token);
+        if let Ok(ref data) = result {
+            write_cache(&path_owned, data);
+        }
+        let _ = tx.send(result);
     });
 
     match rx.recv_timeout(FETCH_TIMEOUT) {
-        Ok(Ok(data)) => {
-            write_cache(path, &data);
-            Some(data)
-        }
-        // On timeout or error, try stale cache
-        _ => read_cache(path, true),
+        Ok(Ok(data)) => Some(data),
+        _ => fallback,
     }
+}
+
+/// Fire-and-forget background refresh — does not block the caller.
+fn spawn_bg_refresh(transcript_path: &Path) {
+    let token = match platform::get_oauth_token().ok() {
+        Some(t) => t,
+        None => return,
+    };
+    let path_owned = transcript_path.to_path_buf();
+    std::thread::spawn(move || {
+        if let Ok(data) = fetch_usage_limits(&token) {
+            write_cache(&path_owned, &data);
+        }
+    });
 }
 
 /// Fetch usage limits from the Anthropic API.
@@ -102,7 +141,7 @@ struct CacheEnvelope {
 fn cache_path(transcript_path: &Path) -> Option<PathBuf> {
     let dir = transcript_path.parent()?;
     let stem = transcript_path.file_stem()?.to_str()?;
-    Some(dir.join("cship").join(format!("{stem}-usage-limits")))
+    Some(dir.join("statusline-cache").join(format!("{stem}-usage-limits")))
 }
 
 fn now_epoch() -> u64 {
@@ -112,24 +151,22 @@ fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
-fn read_cache(transcript_path: &Path, allow_stale: bool) -> Option<UsageLimits> {
+/// Read cache and return (data, age_seconds). Returns None if no cache file.
+/// Early-invalidation (usage window reset) forces age to look expired.
+fn read_cache_age(transcript_path: &Path) -> Option<(UsageLimits, u64)> {
     let path = cache_path(transcript_path)?;
     let raw = std::fs::read_to_string(&path).ok()?;
     let envelope: CacheEnvelope = serde_json::from_str(&raw).ok()?;
 
-    if allow_stale {
-        return Some(envelope.data);
+    let now = now_epoch();
+    let age = now.saturating_sub(envelope.expires_at.saturating_sub(CACHE_TTL_SECS));
+
+    // Early invalidation if a usage window has reset — treat as very stale
+    if now >= envelope.five_hour_resets_at || now >= envelope.seven_day_resets_at {
+        return Some((envelope.data, CACHE_STALE_MAX_SECS + 1));
     }
 
-    let now = now_epoch();
-    if now >= envelope.expires_at {
-        return None;
-    }
-    // Early invalidation if a usage window has reset
-    if now >= envelope.five_hour_resets_at || now >= envelope.seven_day_resets_at {
-        return None;
-    }
-    Some(envelope.data)
+    Some((envelope.data, age))
 }
 
 fn write_cache(transcript_path: &Path, data: &UsageLimits) {
@@ -349,9 +386,10 @@ mod tests {
     fn cache_roundtrip() {
         let (_dir, transcript) = temp_transcript("rt");
         write_cache(&transcript, &sample_data());
-        let result = read_cache(&transcript, false);
+        let result = read_cache_age(&transcript);
         assert!(result.is_some());
-        let data = result.unwrap();
+        let (data, age) = result.unwrap();
+        assert!(age < CACHE_TTL_SECS, "freshly written cache should be fresh");
         assert!((data.five_hour_pct.unwrap() - 23.4).abs() < f64::EPSILON);
         assert!((data.seven_day_pct.unwrap() - 45.1).abs() < f64::EPSILON);
     }
@@ -360,9 +398,10 @@ mod tests {
     fn cache_roundtrip_no_seven_day() {
         let (_dir, transcript) = temp_transcript("rt_no7d");
         write_cache(&transcript, &sample_data_no_seven_day());
-        let result = read_cache(&transcript, false);
+        let result = read_cache_age(&transcript);
         assert!(result.is_some());
-        let data = result.unwrap();
+        let (data, age) = result.unwrap();
+        assert!(age < CACHE_TTL_SECS);
         assert!((data.five_hour_pct.unwrap() - 99.0).abs() < f64::EPSILON);
         assert!(data.seven_day_pct.is_none());
     }
@@ -370,7 +409,7 @@ mod tests {
     #[test]
     fn cache_miss_nonexistent() {
         let (_dir, transcript) = temp_transcript("miss");
-        assert!(read_cache(&transcript, false).is_none());
+        assert!(read_cache_age(&transcript).is_none());
     }
 
     #[test]
@@ -378,17 +417,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("deep").join("nested").join("t.jsonl");
         write_cache(&transcript, &sample_data());
-        let cache_file = dir.path().join("deep").join("nested").join("cship").join("t-usage-limits");
+        let cache_file = dir.path().join("deep").join("nested").join("statusline-cache").join("t-usage-limits");
         assert!(cache_file.exists());
     }
 
     #[test]
-    fn cache_ttl_invalidation() {
+    fn cache_ttl_expired_reports_stale_age() {
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("transcript.jsonl");
         write_cache(&transcript, &sample_data());
-        // Overwrite with expired envelope
-        let path = dir.path().join("cship").join("transcript-usage-limits");
+        // Overwrite with expired envelope (expires_at = 0 means written CACHE_TTL_SECS ago from epoch 0)
+        let path = dir.path().join("statusline-cache").join("transcript-usage-limits");
         let expired = serde_json::json!({
             "data": {
                 "five_hour_pct": 23.4,
@@ -401,7 +440,10 @@ mod tests {
             "seven_day_resets_at": 9_999_999_999_u64
         });
         std::fs::write(&path, serde_json::to_string(&expired).unwrap()).unwrap();
-        assert!(read_cache(&transcript, false).is_none(), "expired TTL");
+        let result = read_cache_age(&transcript);
+        assert!(result.is_some(), "expired cache still returns data");
+        let (_data, age) = result.unwrap();
+        assert!(age >= CACHE_TTL_SECS, "age should exceed TTL: got {age}");
     }
 
     #[test]
@@ -414,7 +456,10 @@ mod tests {
             seven_day_resets_at: "2099-01-01T00:00:00Z".into(),
         };
         write_cache(&transcript, &data);
-        assert!(read_cache(&transcript, false).is_none());
+        let result = read_cache_age(&transcript);
+        assert!(result.is_some());
+        let (_, age) = result.unwrap();
+        assert!(age > CACHE_STALE_MAX_SECS, "reset window passed → forced very stale");
     }
 
     #[test]
@@ -428,16 +473,19 @@ mod tests {
             seven_day_resets_at: String::new(),
         };
         write_cache(&transcript, &data);
-        assert!(read_cache(&transcript, false).is_some(), "empty resets_at should not invalidate");
+        let result = read_cache_age(&transcript);
+        assert!(result.is_some(), "empty resets_at should not invalidate");
+        let (_, age) = result.unwrap();
+        assert!(age < CACHE_TTL_SECS, "should still be fresh");
     }
 
     #[test]
-    fn cache_allow_stale_returns_expired() {
+    fn cache_stale_still_returns_data() {
         let dir = tempfile::tempdir().unwrap();
         let transcript = dir.path().join("transcript.jsonl");
         write_cache(&transcript, &sample_data());
-        let path = dir.path().join("cship").join("transcript-usage-limits");
-        // Expire it
+        let path = dir.path().join("statusline-cache").join("transcript-usage-limits");
+        // Make it expired but data should still be accessible
         let expired = serde_json::json!({
             "data": {
                 "five_hour_pct": 77.0,
@@ -450,15 +498,15 @@ mod tests {
             "seven_day_resets_at": 9_999_999_999_u64
         });
         std::fs::write(&path, serde_json::to_string(&expired).unwrap()).unwrap();
-        assert!(read_cache(&transcript, false).is_none(), "normal read: expired");
-        let stale = read_cache(&transcript, true);
-        assert!(stale.is_some(), "stale read should return data");
-        assert!((stale.unwrap().five_hour_pct.unwrap() - 77.0).abs() < f64::EPSILON);
+        let result = read_cache_age(&transcript);
+        assert!(result.is_some(), "stale cache still returns data");
+        let (data, _) = result.unwrap();
+        assert!((data.five_hour_pct.unwrap() - 77.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn cache_allow_stale_returns_none_when_no_file() {
-        let (_dir, transcript) = temp_transcript("stale_miss");
-        assert!(read_cache(&transcript, true).is_none());
+    fn cache_no_file_returns_none() {
+        let (_dir, transcript) = temp_transcript("no_file");
+        assert!(read_cache_age(&transcript).is_none());
     }
 }

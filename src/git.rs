@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const CACHE_FILE: &str = "/tmp/claude-statusline-git";
+use crate::platform;
+
+const CACHE_FILE: &str = "/tmp/claude-statusline-cache";
 const CACHE_TTL: u64 = 5; // seconds
+const CACHE_EVICT: u64 = 3600; // drop entries older than 1 hour
 
 pub struct GitInfo {
     pub branch: Option<String>,
@@ -29,31 +33,73 @@ impl GitInfo {
     }
 }
 
-pub fn get_info(cwd: &str) -> GitInfo {
-    // Try cache first
-    if let Some(info) = read_cache() {
-        return info;
+/// Cache key for a given cwd
+fn cache_key(cwd: &str) -> String {
+    let hash = platform::sha256_hex(cwd);
+    hash[..12].to_string()
+}
+
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Read all entries from the single cache file.
+/// Format: one line per entry: "key timestamp branch|staged|modified|untracked"
+fn read_all_entries() -> HashMap<String, (u64, String)> {
+    let mut map = HashMap::new();
+    let Ok(content) = fs::read_to_string(CACHE_FILE) else { return map };
+    for line in content.lines() {
+        let mut parts = line.splitn(3, ' ');
+        let Some(key) = parts.next() else { continue };
+        let Some(ts_str) = parts.next() else { continue };
+        let Some(data) = parts.next() else { continue };
+        let Ok(ts) = ts_str.parse::<u64>() else { continue };
+        map.insert(key.to_string(), (ts, data.to_string()));
     }
-
-    let info = fetch_git_info(cwd);
-    write_cache(&info);
-    info
+    map
 }
 
-fn cache_age() -> Option<u64> {
-    let meta = fs::metadata(CACHE_FILE).ok()?;
-    let modified = meta.modified().ok()?;
-    let age = SystemTime::now().duration_since(modified).ok()?;
-    Some(age.as_secs())
+/// Write entries back, evicting anything older than CACHE_EVICT.
+fn write_all_entries(entries: &HashMap<String, (u64, String)>) {
+    let now = now_epoch();
+    let mut content = String::new();
+    for (key, (ts, data)) in entries {
+        if now.saturating_sub(*ts) < CACHE_EVICT {
+            content.push_str(key);
+            content.push(' ');
+            content.push_str(&ts.to_string());
+            content.push(' ');
+            content.push_str(data);
+            content.push('\n');
+        }
+    }
+    let tmp = format!("{}.tmp", CACHE_FILE);
+    if fs::write(&tmp, &content).is_ok() {
+        let _ = fs::rename(&tmp, CACHE_FILE);
+    }
 }
 
-fn read_cache() -> Option<GitInfo> {
-    let age = cache_age()?;
-    if age > CACHE_TTL {
+fn read_cache(cwd: &str) -> Option<GitInfo> {
+    let key = cache_key(cwd);
+    let entries = read_all_entries();
+    let (ts, data) = entries.get(&key)?;
+    let now = now_epoch();
+    if now.saturating_sub(*ts) > CACHE_TTL {
         return None;
     }
-    let content = fs::read_to_string(CACHE_FILE).ok()?;
-    parse_cache(&content)
+    parse_cache(data)
+}
+
+fn write_cache(cwd: &str, info: &GitInfo) {
+    let key = cache_key(cwd);
+    let branch = info.branch.as_deref().unwrap_or("");
+    let data = format!("{}|{}|{}|{}", branch, info.staged, info.modified, info.untracked);
+    let mut entries = read_all_entries();
+    entries.insert(key, (now_epoch(), data));
+    write_all_entries(&entries);
 }
 
 fn parse_cache(content: &str) -> Option<GitInfo> {
@@ -77,14 +123,13 @@ fn parse_cache(content: &str) -> Option<GitInfo> {
     })
 }
 
-fn write_cache(info: &GitInfo) {
-    let branch = info.branch.as_deref().unwrap_or("");
-    let content = format!("{}|{}|{}|{}", branch, info.staged, info.modified, info.untracked);
-    // Atomic write: tmp + rename
-    let tmp = format!("{}.tmp", CACHE_FILE);
-    if fs::write(&tmp, &content).is_ok() {
-        let _ = fs::rename(&tmp, CACHE_FILE);
+pub fn get_info(cwd: &str) -> GitInfo {
+    if let Some(info) = read_cache(cwd) {
+        return info;
     }
+    let info = fetch_git_info(cwd);
+    write_cache(cwd, &info);
+    info
 }
 
 fn fetch_git_info(cwd: &str) -> GitInfo {
@@ -147,8 +192,7 @@ fn fetch_git_info(cwd: &str) -> GitInfo {
 
 // Timeout wrapper — kill git if it takes too long
 pub fn get_info_with_timeout(cwd: &str, timeout: Duration) -> GitInfo {
-    // Try cache first (no timeout needed for cache)
-    if let Some(info) = read_cache() {
+    if let Some(info) = read_cache(cwd) {
         return info;
     }
 
@@ -162,7 +206,7 @@ pub fn get_info_with_timeout(cwd: &str, timeout: Duration) -> GitInfo {
 
     match rx.recv_timeout(timeout) {
         Ok(info) => {
-            write_cache(&info);
+            write_cache(cwd, &info);
             info
         }
         Err(_) => GitInfo::default(),

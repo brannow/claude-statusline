@@ -22,7 +22,7 @@ fn credential_service_name() -> String {
 }
 
 /// SHA-256 producing a hex string — pure Rust, no external dependencies.
-fn sha256_hex(input: &str) -> String {
+pub fn sha256_hex(input: &str) -> String {
     sha256_software(input)
 }
 

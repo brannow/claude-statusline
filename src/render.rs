@@ -176,10 +176,12 @@ fn build_line1(input: &Input, git: &GitInfo, p: &Palette, max_width: usize) -> S
         cols.push(Col::grow(git_str));
     }
 
-    // Agent — growable, agent names can vary
-    if let Some(agent) = input.agent.as_ref().and_then(|a| a.name.as_deref()) {
-        if !agent.is_empty() {
-            cols.push(Col::grow(format!("{txt}{agent}{RST}{bg}")));
+    // Agent — growable, drop at narrow widths
+    if max_width >= 100 {
+        if let Some(agent) = input.agent.as_ref().and_then(|a| a.name.as_deref()) {
+            if !agent.is_empty() {
+                cols.push(Col::grow(format!("{txt}{agent}{RST}{bg}")));
+            }
         }
     }
 
@@ -190,11 +192,13 @@ fn build_line1(input: &Input, git: &GitInfo, p: &Palette, max_width: usize) -> S
         cols.push(Col::fixed(format!("{txt_bold}{cost_str}{RST}{bg}")));
     }
 
-    // Mode — fixed, always short
-    if let Some(mode) = &input.mode {
-        if !mode.is_empty() {
-            let mode_clr = Rgb(150, 100, 0).fg_bold();
-            cols.push(Col::fixed(format!("{mode_clr}{mode}{RST}{bg}")));
+    // Mode — fixed, drop at very narrow widths
+    if max_width >= 80 {
+        if let Some(mode) = &input.mode {
+            if !mode.is_empty() {
+                let mode_clr = Rgb(150, 100, 0).fg_bold();
+                cols.push(Col::fixed(format!("{mode_clr}{mode}{RST}{bg}")));
+            }
         }
     }
 
@@ -218,11 +222,16 @@ fn build_line2(input: &Input, max_width: usize, usage: Option<&UsageLimits>) -> 
     let time_clr = color::duration_color(h);
     let tc = time_clr.fg();
 
-    let pct = input.context_window.as_ref()
-        .and_then(|c| c.used_percentage).map(|p| p as u64).unwrap_or(0);
-    let ctx_size = input.context_window.as_ref()
+    // Autocompact reserves a fixed 33k buffer — show % of usable capacity
+    const COMPACT_BUFFER: u64 = 33_000;
+    let ctx_size_raw = input.context_window.as_ref()
         .and_then(|c| c.context_window_size).unwrap_or(200_000);
-    let ctx_size_k = ctx_size / 1000;
+    let ctx_usable = ctx_size_raw.saturating_sub(COMPACT_BUFFER);
+    let ctx_usable_k = ctx_usable / 1000;
+    // Recalculate pct against usable capacity (100% = autocompact)
+    let tokens_used = input.context_window.as_ref()
+        .and_then(|c| c.used_percentage).map(|p| (ctx_size_raw as f64 * p / 100.0) as u64).unwrap_or(0);
+    let pct = if ctx_usable > 0 { (tokens_used * 100 / ctx_usable).min(100) } else { 0 };
     let ctx_clr = color::pct_color(pct);
     let cc = ctx_clr.fg();
 
@@ -255,14 +264,14 @@ fn build_line2(input: &Input, max_width: usize, usage: Option<&UsageLimits>) -> 
     let ctx_col_idx = cols.len();
     let bar_placeholder = make_bar(pct, 10, &ctx_clr, &L2_DIM);
     cols.push(Col::grow_equal(
-        format!("{bar_placeholder} {cc}{pct}%{RST}{bg} {txt}of {ctx_size_k}k"),
+        format!("{bar_placeholder} {cc}{pct}%{RST}{bg} {txt}of {ctx_usable_k}k"),
         BAR_WEIGHT,
     ));
 
     // 5h usage bar — growable with equal weight, placeholder bar
     let five_col_idx = five_hour.as_ref().map(|_| cols.len());
     if let Some((fp, ref fc, ref fr)) = five_hour {
-        let bar = make_bar(fp, 5, &fc, &L2_DIM);
+        let bar = make_bar(fp, 5, fc, &L2_DIM);
         let fc_fg = fc.fg();
         cols.push(Col::grow_equal(
             format!("{txt}5h{RST}{bg} {bar} {fc_fg}{fp}%{RST}{bg} {dim}{fr}{RST}{bg}"),
@@ -270,19 +279,21 @@ fn build_line2(input: &Input, max_width: usize, usage: Option<&UsageLimits>) -> 
         ));
     }
 
-    // 7d usage bar — growable with equal weight, placeholder bar
-    let seven_col_idx = seven_day.as_ref().map(|_| cols.len());
-    if let Some((sp, ref sc, ref sr)) = seven_day {
-        let bar = make_bar(sp, 5, &sc, &L2_DIM);
-        let sc_fg = sc.fg();
-        cols.push(Col::grow_equal(
-            format!("{txt}7d{RST}{bg} {bar} {sc_fg}{sp}%{RST}{bg} {dim}{sr}{RST}{bg}"),
-            BAR_WEIGHT,
-        ));
+    // 7d usage bar — growable with equal weight, drop at narrow widths
+    let seven_col_idx = if max_width >= 100 { seven_day.as_ref().map(|_| cols.len()) } else { None };
+    if max_width >= 100 {
+        if let Some((sp, ref sc, ref sr)) = seven_day {
+            let bar = make_bar(sp, 5, sc, &L2_DIM);
+            let sc_fg = sc.fg();
+            cols.push(Col::grow_equal(
+                format!("{txt}7d{RST}{bg} {bar} {sc_fg}{sp}%{RST}{bg} {dim}{sr}{RST}{bg}"),
+                BAR_WEIGHT,
+            ));
+        }
     }
 
-    // Lines changed — fixed
-    if lines_added > 0 || lines_removed > 0 {
+    // Lines changed — fixed, drop at narrow widths
+    if max_width >= 125 && (lines_added > 0 || lines_removed > 0) {
         let mut lc = String::new();
         if lines_added > 0 {
             let ac = ADDED_CLR.fg();
@@ -299,23 +310,22 @@ fn build_line2(input: &Input, max_width: usize, usage: Option<&UsageLimits>) -> 
     let widths = distribute(&cols, max_width);
 
     // Recalculate all bar widths based on actual allocated space
-    // Context bar: "▰▰▰▱▱ 35% of 200k"
+    // Context bar: "▰▰▰▱▱ 95% of 167k"
     {
         let alloc = widths[ctx_col_idx].saturating_sub(if ctx_col_idx > 0 { 1 } else { 0 });
-        let suffix_width = 1 + pct.to_string().len() + 1 + 3 + ctx_size_k.to_string().len();
+        let suffix_width = 1 + pct.to_string().len() + 1 + 3 + ctx_usable_k.to_string().len();
         let bar_space = alloc.saturating_sub(suffix_width + 3);
         let bar_width = bar_space.max(3);
         let bar = make_bar(pct, bar_width as u64, &ctx_clr, &L2_DIM);
         cols[ctx_col_idx] = Col::grow_equal(
-            format!("{bar} {cc}{pct}%{RST}{bg} {txt}of {ctx_size_k}k"),
+            format!("{bar} {cc}{pct}%{RST}{bg} {txt}of {ctx_usable_k}k"),
             BAR_WEIGHT,
         );
     }
 
     // 5h bar: "5h ▰▰▱▱▱ 72% 2h30m"
     if let (Some(idx), Some((fp, ref fc, ref fr))) = (five_col_idx, &five_hour) {
-        let alloc = widths[idx].saturating_sub(1); // minus separator
-        // suffix: "5h " (3) + " " (1) + pct + "%" (1) + " " (1) + reset
+        let alloc = widths[idx].saturating_sub(1);
         let suffix_width = 3 + 1 + fp.to_string().len() + 1 + 1 + fr.len();
         let bar_space = alloc.saturating_sub(suffix_width + 2);
         let bar_width = bar_space.max(3);
