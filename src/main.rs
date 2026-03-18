@@ -62,11 +62,14 @@ fn run() {
     let cols = terminal_width();
 
     // Render and print
-    let (line1, line2) = render::render(&input, &git, &palette, cols, usage_limits.as_ref());
-    println!("{}", line1);
-    print!("{}", line2);
-    if is_tty {
-        println!();
+    let lines = render::render(&input, &git, &palette, cols, usage_limits.as_ref());
+    for (i, line) in lines.iter().enumerate() {
+        let is_last = i == lines.len() - 1;
+        if is_last && !is_tty {
+            print!("{}", line);
+        } else {
+            println!("{}", line);
+        }
     }
 }
 
