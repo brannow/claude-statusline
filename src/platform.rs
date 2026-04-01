@@ -1,89 +1,8 @@
-use std::process::Command;
-
-/// Read the Claude Code OAuth token from the OS credential store.
-/// Token is held only in memory — never written to disk or logs.
-///
-/// The keychain service name is "Claude Code-credentials-{hash}" where {hash}
-/// is the first 8 hex chars of SHA256(config_dir_path). When CLAUDE_CONFIG_DIR
-/// is not set, the default config dir (~/.claude) is used.
-///
-/// Only subscription-based installs store OAuth tokens; API-key installs won't
-/// have a matching keychain entry and this returns Err.
-
-/// Derive the keychain service name for the active Claude Code installation.
-/// Format: "Claude Code-credentials-{sha256(config_dir)[:8]}"
-fn credential_service_name() -> String {
-    let config_dir = std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "~".into());
-        format!("{home}/.claude")
-    });
-    let hash = sha256_hex(&config_dir);
-    format!("Claude Code-credentials-{}", &hash[..8])
-}
-
 /// SHA-256 producing a hex string — pure Rust, no external dependencies.
 pub fn sha256_hex(input: &str) -> String {
     sha256_software(input)
 }
 
-#[cfg(target_os = "macos")]
-pub fn get_oauth_token() -> Result<String, String> {
-    let service = credential_service_name();
-    let output = Command::new("security")
-        .args(["find-generic-password", "-s", &service, "-w"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("failed to invoke security: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!("Claude Code credentials not found (service: {service})"));
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout);
-    extract_access_token(raw.trim())
-        .ok_or_else(|| "could not parse access token from credentials".into())
-}
-
-#[cfg(target_os = "linux")]
-pub fn get_oauth_token() -> Result<String, String> {
-    // Try credentials file first (Linux/WSL2)
-    let config_dir = std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "~".into());
-        format!("{home}/.claude")
-    });
-    let creds_path = std::path::Path::new(&config_dir).join(".credentials.json");
-    if let Ok(contents) = std::fs::read_to_string(&creds_path) {
-        if let Some(token) = extract_access_token(contents.trim()) {
-            return Ok(token);
-        }
-    }
-
-    // Fallback: secret-tool with hashed service name
-    let service = credential_service_name();
-    let output = Command::new("secret-tool")
-        .args(["lookup", "service", &service])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("failed to invoke secret-tool: {e}"))?;
-
-    if !output.status.success() {
-        return Err("Claude Code credentials not found".into());
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout);
-    extract_access_token(raw.trim())
-        .ok_or_else(|| "could not parse access token from credentials".into())
-}
-
-fn extract_access_token(json: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let token = v.get("claudeAiOauth")?.get("accessToken")?.as_str()?.to_string();
-    if token.is_empty() { None } else { Some(token) }
-}
-
-/// Pure-Rust SHA-256 implementation — no external dependencies.
 fn sha256_software(input: &str) -> String {
     let msg = input.as_bytes();
 
@@ -158,89 +77,21 @@ fn sha256_software(input: &str) -> String {
 mod tests {
     use super::*;
 
-    // ── SHA-256 ──────────────────────────────────────────────────────────────
-
     #[test]
     fn sha256_empty_string() {
-        // NIST test vector: SHA-256("") = e3b0c44298fc1c149afbf4c8996fb924...
         let hash = sha256_hex("");
         assert_eq!(&hash[..8], "e3b0c442");
     }
 
     #[test]
     fn sha256_known_value() {
-        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223...
         let hash = sha256_hex("abc");
         assert_eq!(&hash[..8], "ba7816bf");
     }
 
     #[test]
-    fn sha256_config_dir_private() {
-        // Verified against Python hashlib and macOS Keychain entry
-        let hash = sha256_hex("/Users/b.rannow/.claude-private");
-        assert_eq!(&hash[..8], "11b1338c");
-    }
-
-    #[test]
     fn sha256_longer_input() {
-        // SHA-256("The quick brown fox jumps over the lazy dog")
         let hash = sha256_hex("The quick brown fox jumps over the lazy dog");
-        assert_eq!(
-            &hash[..16],
-            "d7a8fbb307d78094",
-        );
-    }
-
-    // ── credential_service_name ──────────────────────────────────────────────
-
-    #[test]
-    fn service_name_uses_claude_config_dir_env() {
-        // Temporarily set CLAUDE_CONFIG_DIR for this test
-        let orig = std::env::var("CLAUDE_CONFIG_DIR").ok();
-        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", "/tmp/test-claude-config") };
-
-        let name = credential_service_name();
-        let expected_hash = &sha256_hex("/tmp/test-claude-config")[..8];
-        assert_eq!(name, format!("Claude Code-credentials-{expected_hash}"));
-
-        // Restore
-        match orig {
-            Some(v) => unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", v) },
-            None => unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") },
-        }
-    }
-
-    // ── extract_access_token ─────────────────────────────────────────────────
-
-    #[test]
-    fn extract_valid_token() {
-        let json = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-abc123","refreshToken":"rt","expiresAt":9999}}"#;
-        assert_eq!(
-            extract_access_token(json),
-            Some("sk-ant-oat01-abc123".to_string()),
-        );
-    }
-
-    #[test]
-    fn extract_missing_oauth_field() {
-        let json = r#"{"someOther":{"key":"value"}}"#;
-        assert_eq!(extract_access_token(json), None);
-    }
-
-    #[test]
-    fn extract_empty_token() {
-        let json = r#"{"claudeAiOauth":{"accessToken":""}}"#;
-        assert_eq!(extract_access_token(json), None);
-    }
-
-    #[test]
-    fn extract_invalid_json() {
-        assert_eq!(extract_access_token("not json at all"), None);
-    }
-
-    #[test]
-    fn extract_missing_access_token_key() {
-        let json = r#"{"claudeAiOauth":{"refreshToken":"rt"}}"#;
-        assert_eq!(extract_access_token(json), None);
+        assert_eq!(&hash[..16], "d7a8fbb307d78094");
     }
 }

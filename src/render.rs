@@ -1,20 +1,19 @@
 use crate::color::{self, Palette, Rgb, L2_BG, L2_DIM, L2_TXT, RST};
 use crate::git::GitInfo;
 use crate::icons::*;
-use crate::input::Input;
-use crate::usage::UsageLimits;
+use crate::input::{Input, RateLimits};
 
-/// Returns 2 or 3 lines depending on whether usage limits are available.
+/// Returns 2 or 3 lines depending on whether rate limits are available.
 /// Line 1: Model, project dir, git branch+status (acts as spacer for Claude Code overlay)
 /// Line 2: Duration, context bar, cost, lines changed
-/// Line 3 (optional): 5h and 7d usage bars (subscription accounts only)
-pub fn render(input: &Input, git: &GitInfo, palette: &Palette, cols: u16, usage: Option<&UsageLimits>) -> Vec<String> {
+/// Line 3 (optional): 5h and 7d usage bars
+pub fn render(input: &Input, git: &GitInfo, palette: &Palette, cols: u16, rate_limits: Option<&RateLimits>) -> Vec<String> {
     let cols = cols as usize;
     let inner_width = if cols > 2 { cols - 2 } else { cols };
 
     let line1 = build_line1(input, git, palette, inner_width);
     let line2 = build_line2(input, inner_width);
-    let line3 = build_line3(inner_width, usage);
+    let line3 = build_line3(inner_width, rate_limits);
 
     let mut lines = Vec::new();
 
@@ -140,11 +139,12 @@ fn build_line2(input: &Input, max_width: usize) -> String {
 
 // ── Line 3: Usage limits (subscription only) ────────────────────────────────
 
-fn build_line3(max_width: usize, usage: Option<&UsageLimits>) -> Option<String> {
-    let usage = usage?;
+fn build_line3(max_width: usize, rate_limits: Option<&RateLimits>) -> Option<String> {
+    let limits = rate_limits?;
 
     // Need at least 5h data to show this line
-    let five_pct = usage.five_hour_pct?;
+    let five = limits.five_hour.as_ref()?;
+    let five_pct = five.used_percentage?;
 
     let bg = L2_BG.bg();
     let txt = L2_TXT.fg();
@@ -156,18 +156,20 @@ fn build_line3(max_width: usize, usage: Option<&UsageLimits>) -> Option<String> 
     let fp = five_pct.round() as u64;
     let fc = color::pct_color(fp);
     let fc_fg = fc.fg();
-    let fr = crate::usage::format_time_until(&usage.five_hour_resets_at);
+    let fr = crate::usage::format_time_until(five.resets_at);
     let bar5 = make_bar(fp, 15, &fc, &L2_DIM);
     segments.push(format!("{txt}5h{RST}{bg} {bar5} {fc_fg}{fp}%{RST}{bg} {dim}{fr}{RST}{bg}"));
 
-    // 7d usage (omit if null — API accounts)
-    if let Some(seven_pct) = usage.seven_day_pct {
-        let sp = seven_pct.round() as u64;
-        let sc = color::pct_color(sp);
-        let sc_fg = sc.fg();
-        let sr = crate::usage::format_time_until(&usage.seven_day_resets_at);
-        let bar7 = make_bar(sp, 15, &sc, &L2_DIM);
-        segments.push(format!("{txt}7d{RST}{bg} {bar7} {sc_fg}{sp}%{RST}{bg} {dim}{sr}{RST}{bg}"));
+    // 7d usage (omit if absent)
+    if let Some(seven) = &limits.seven_day {
+        if let Some(seven_pct) = seven.used_percentage {
+            let sp = seven_pct.round() as u64;
+            let sc = color::pct_color(sp);
+            let sc_fg = sc.fg();
+            let sr = crate::usage::format_time_until(seven.resets_at);
+            let bar7 = make_bar(sp, 15, &sc, &L2_DIM);
+            segments.push(format!("{txt}7d{RST}{bg} {bar7} {sc_fg}{sp}%{RST}{bg} {dim}{sr}{RST}{bg}"));
+        }
     }
 
     Some(render_segments(&segments, max_width, &bg, &dim))

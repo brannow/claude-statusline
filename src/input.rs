@@ -12,6 +12,19 @@ pub struct Input {
     pub mode: Option<String>,
     pub worktree: Option<Worktree>,
     pub transcript_path: Option<String>,
+    pub rate_limits: Option<RateLimits>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct RateLimits {
+    pub five_hour: Option<RateLimitWindow>,
+    pub seven_day: Option<RateLimitWindow>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct RateLimitWindow {
+    pub used_percentage: Option<f64>,
+    pub resets_at: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
