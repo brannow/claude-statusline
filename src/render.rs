@@ -124,12 +124,26 @@ fn build_line2(input: &Input, max_width: usize) -> String {
     let bar = make_bar(pct, 20, &ctx_clr, &L2_DIM);
     segments.push(format!("{bar} {cc}{pct}%{RST}{bg} {txt}of {ctx_usable_k}k{RST}{bg}"));
 
-    // Cost
-    let cost = input.cost.as_ref()
-        .and_then(|c| c.total_cost_usd).unwrap_or(0.0);
-    if cost > 0.001 {
-        let cost_str = if cost < 10.0 { format!("${:.2}", cost) }
-        else { format!("${:.1}", cost) };
+    // Cost — calculate from tokens if DeepSeek model, otherwise use JSON-provided
+    let model_id = input.model.as_ref().and_then(|m| m.id.as_deref());
+    let token_cost = model_id.and_then(|id| {
+        let usage = input.context_window.as_ref()?.current_usage.as_ref()?;
+        let input_tok = usage.input_tokens?;
+        let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+        let output_tok = usage.output_tokens?;
+        crate::pricing::calculate_cost(id, input_tok, cache_read, output_tok)
+    });
+    let cost = token_cost.unwrap_or(
+        input.cost.as_ref().and_then(|c| c.total_cost_usd).unwrap_or(0.0),
+    );
+    if cost > 0.0001 {
+        let cost_str = if cost < 0.01 {
+            format!("${:.4}", cost)
+        } else if cost < 10.0 {
+            format!("${:.2}", cost)
+        } else {
+            format!("${:.1}", cost)
+        };
         let cost_bold = L2_TXT.fg_bold();
         segments.push(format!("{cost_bold}{cost_str}{RST}{bg}"));
     }

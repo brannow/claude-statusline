@@ -5,6 +5,7 @@ mod git;
 mod icons;
 mod input;
 mod platform;
+mod pricing;
 mod render;
 mod usage;
 
