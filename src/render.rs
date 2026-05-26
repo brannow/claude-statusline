@@ -128,14 +128,15 @@ fn build_line2(input: &Input, max_width: usize) -> String {
     let model_id = input.model.as_ref().and_then(|m| m.id.as_deref());
     let session_id = input.session_id.as_deref().unwrap_or("unknown");
     let token_cost = model_id.and_then(|id| {
+        crate::pricing::detect(id)?;
         let usage = input.context_window.as_ref()?.current_usage.as_ref()?;
         let input_tok = usage.input_tokens?;
         let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
         let output_tok = usage.output_tokens?;
         Some(crate::pricing::get_accumulated_cost(id, session_id, input_tok, cache_read, output_tok))
     });
-    let cost = token_cost.unwrap_or(
-        input.cost.as_ref().and_then(|c| c.total_cost_usd).unwrap_or(0.0),
+    let cost = token_cost.unwrap_or_else(||
+        input.cost.as_ref().and_then(|c| c.total_cost_usd).unwrap_or(0.0)
     );
     if cost > 0.0001 {
         let cost_str = if cost < 0.01 {
