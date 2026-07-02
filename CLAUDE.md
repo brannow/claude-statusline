@@ -79,8 +79,13 @@ Each line now has a stable, narrow minimum width, so all three lines survive at 
   "rate_limits": {
     "five_hour":  { "used_percentage": 42.0, "resets_at": 1234567890 },
     "seven_day":  { "used_percentage": 73.0, "resets_at": 1234567890 }
-  }
+  },
+  "effort": { "level": "xhigh" }
 }
 ```
 
 `rate_limits` requires Claude Code ≥ v2.1.80. Absent fields are handled gracefully — the corresponding UI element is omitted.
+
+### Reasoning effort on Line 1
+
+`effort.level` (`low`/`medium`/`high`/`xhigh`/`max`) is rendered next to the model name, e.g. `Sonnet 5 (xhigh)`, and lives in the same segment so it can't be dropped independently on narrow terminals. Claude Code only populates this field when the current model supports the effort parameter — DeepSeek doesn't, so the field is always absent for it. Since DeepSeek has no real effort level to report, `render.rs` falls back to the `CLAUDE_CODE_EFFORT_LEVEL` env var (the same override var Claude Code itself supports) when the model is DeepSeek, letting a DeepSeek launch wrapper fake a level (e.g. `max`) directly.

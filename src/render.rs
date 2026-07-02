@@ -46,13 +46,33 @@ fn build_line1(input: &Input, git: &GitInfo, p: &Palette, max_width: usize) -> S
 
     let model_name = input.model.as_ref()
         .and_then(|m| m.display_name.as_deref()).unwrap_or("Claude");
+    let model_id = input.model.as_ref().and_then(|m| m.id.as_deref()).unwrap_or("");
     let dir = input.cwd.as_deref().unwrap_or("~")
         .rsplit('/').next().unwrap_or("~");
 
     let mut segments: Vec<String> = Vec::new();
 
-    // Model
-    segments.push(format!("{txt_bold}{model_name}{RST}{bg}"));
+    // Model (+ reasoning effort, if reported). DeepSeek doesn't support the
+    // effort parameter so Claude Code never populates `effort.level` for it —
+    // fall back to CLAUDE_CODE_EFFORT_LEVEL, which the DeepSeek launch wrapper
+    // sets directly since there's no real session value to read.
+    let effort = input.effort.as_ref()
+        .and_then(|e| e.level.clone())
+        .or_else(|| {
+            if crate::pricing::detect(model_id).is_some() {
+                std::env::var("CLAUDE_CODE_EFFORT_LEVEL").ok()
+            } else {
+                None
+            }
+        });
+    match effort {
+        Some(level) if !level.is_empty() => {
+            segments.push(format!("{txt_bold}{model_name}{RST}{bg} {txt}({level}){RST}{bg}"));
+        }
+        _ => {
+            segments.push(format!("{txt_bold}{model_name}{RST}{bg}"));
+        }
+    }
 
     // Project directory
     segments.push(format!("{txt}{dir}{RST}{bg}"));

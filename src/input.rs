@@ -13,6 +13,12 @@ pub struct Input {
     pub worktree: Option<Worktree>,
     pub transcript_path: Option<String>,
     pub rate_limits: Option<RateLimits>,
+    pub effort: Option<Effort>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct Effort {
+    pub level: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

@@ -134,6 +134,9 @@ fn demo_input() -> input::Input {
             id: Some("claude-opus-4-6".into()),
             display_name: Some("Opus".into()),
         }),
+        effort: Some(input::Effort {
+            level: Some("xhigh".into()),
+        }),
         cost: Some(input::Cost {
             total_cost_usd: Some(1.37),
             total_duration_ms: Some(2_340_000), // 39 minutes
