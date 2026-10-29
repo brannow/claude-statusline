@@ -1,0 +1,77 @@
+# Push a tag matching Cargo.toml's version (e.g. v0.1.0) to build static
+# binaries and publish them as a GitHub Release. install.sh downloads from
+# releases/latest, so asset names here must match its detect_asset().
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin, asset: claude-statusline-darwin-arm64, native: true }
+          - { os: macos-latest, target: x86_64-apple-darwin, asset: claude-statusline-darwin-x86_64, native: false }
+          # musl: fully static, runs on any distro regardless of glibc version
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: claude-statusline-linux-x86_64, native: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: claude-statusline-linux-arm64, native: true }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches Cargo.toml version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version v$version"
+            exit 1
+          fi
+
+      - run: rustup target add ${{ matrix.target }}
+
+      - if: matrix.native
+        run: cargo test --locked --target ${{ matrix.target }}
+
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Smoke test
+        if: matrix.native
+        run: |
+          out=$(echo '{"cwd":"/tmp","model":{"display_name":"Opus"}}' \
+            | target/${{ matrix.target }}/release/claude-statusline)
+          echo "$out"
+          [ -n "$out" ]
+
+      - run: cp target/${{ matrix.target }}/release/claude-statusline ${{ matrix.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # VERSION lets install.sh skip the download when already up to date.
+      - run: |
+          cd dist
+          sha256sum claude-statusline-* > SHA256SUMS && cat SHA256SUMS
+          echo "${GITHUB_REF_NAME#v}" > VERSION
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

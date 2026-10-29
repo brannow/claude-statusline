@@ -7,12 +7,23 @@ mod input;
 mod platform;
 mod pricing;
 mod render;
+mod setup;
 mod usage;
 
 use std::io::Read;
 use std::time::Duration;
 
 fn main() {
+    // Installer commands run outside catch_unwind: their errors must reach
+    // install.sh as a non-zero exit, not be swallowed.
+    if std::env::args().any(|a| a == "--version") {
+        println!("claude-statusline {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if std::env::args().any(|a| a == "--configure") {
+        std::process::exit(setup::run());
+    }
+
     // Statusline must never crash — catch panics and exit silently
     let _ = std::panic::catch_unwind(run);
 }

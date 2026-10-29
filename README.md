@@ -10,7 +10,32 @@ Run it directly to see a demo preview with test data:
 claude-statusline
 ```
 
-## Build & Install
+## Install
+
+macOS or Linux (x86_64/arm64), no Rust toolchain needed:
+
+```
+curl -fsSL https://raw.githubusercontent.com/brannow/claude-statusline/main/install.sh | sh
+```
+
+This downloads the latest release binary to `~/.local/bin/claude-statusline`, verifies its SHA-256, and sets `statusLine` in `~/.claude/settings.json` (an existing file is backed up next to it first). Re-run the same command to update: it skips the download when you're already on the latest release (`CLAUDE_STATUSLINE_FORCE=1` reinstalls anyway).
+
+Options go on `sh`, not on `curl`:
+
+```
+curl -fsSL https://raw.githubusercontent.com/brannow/claude-statusline/main/install.sh \
+  | CLAUDE_CONFIG_DIR=~/.claude-work CLAUDE_STATUSLINE_INSTALL_DIR=/usr/local/bin sh
+```
+
+| Variable | Default |
+|---|---|
+| `CLAUDE_CONFIG_DIR` | `~/.claude` |
+| `CLAUDE_STATUSLINE_INSTALL_DIR` | `~/.local/bin` |
+| `CLAUDE_STATUSLINE_VERSION` | latest release, e.g. `v0.2.0` |
+
+To only (re)point an already installed binary at a config dir: `claude-statusline --configure`.
+
+## Build from source
 
 ```
 make install
@@ -18,7 +43,7 @@ make install
 
 Installs to `/usr/local/bin/claude-statusline`.
 
-## Configure Claude Code
+## Configure Claude Code manually
 
 Add to `~/.claude/settings.json`:
 

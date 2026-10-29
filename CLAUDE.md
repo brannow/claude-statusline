@@ -11,6 +11,16 @@ cargo test            # run unit tests
 ./target/release/claude-statusline --debug  # dump raw JSON to /tmp/
 ```
 
+## Release & one-line install
+
+Pushing a tag `vX.Y.Z` (must equal `Cargo.toml`'s version — CI fails otherwise) runs `.github/workflows/release.yml`, which builds `claude-statusline-{darwin,linux}-{arm64,x86_64}` plus `SHA256SUMS` and publishes a GitHub Release. `install.sh` (`curl … | sh`) downloads from `releases/latest`, verifies the checksum, installs to `~/.local/bin`, then runs `claude-statusline --configure`.
+
+- **Why not a Claude Code plugin:** plugin `settings.json` only honors `agent`/`subagentStatusLine`, and `${CLAUDE_PLUGIN_ROOT}` isn't substituted in `statusLine.command` — a plugin can ship the binary but can't activate it, so it adds nothing over this script.
+- **Why `--configure` lives in the binary:** safe JSON editing from shell needs `jq`/`python3`, which aren't guaranteed. It writes through symlinks (settings.json is often a dotfiles link), refuses to touch unparseable JSON, keeps other `statusLine` fields (`padding`, `refreshInterval`), backs up first, and honors `CLAUDE_CONFIG_DIR`. serde_json's `preserve_order` keeps the user's key order.
+- **Why `--configure`/`--version` run before `catch_unwind`:** the statusline path swallows all errors by design; installer errors must surface as a non-zero exit.
+- **Why musl on Linux:** static binary, no glibc version coupling — runs on any distro.
+- **Why `~/.local/bin`:** no sudo; `statusLine` gets an absolute path, so it doesn't need to be on `PATH`.
+
 ## Architecture
 
 ```
@@ -21,6 +31,7 @@ src/
   color.rs     Rgb type, 12-color palette, threshold colors
   git.rs       Git branch/status fetch with 5s cache and 500ms timeout
   usage.rs     format_time_until() helper for reset countdowns
+  setup.rs     --configure: write statusLine into settings.json (used by install.sh)
   icons.rs     Unicode constants (edges, bar chars) — no Nerd Fonts needed
   platform.rs  Pure-Rust SHA-256 (used for cache keys and palette hashing)
 ```
