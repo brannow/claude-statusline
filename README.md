@@ -18,7 +18,7 @@ macOS or Linux (x86_64/arm64), no Rust toolchain needed:
 curl -fsSL https://raw.githubusercontent.com/brannow/claude-statusline/main/install.sh | sh
 ```
 
-This downloads the latest release binary to `~/.local/bin/claude-statusline`, verifies its SHA-256, and sets `statusLine` in `~/.claude/settings.json` (an existing file is backed up next to it first). Re-run the same command to update: it skips the download when you're already on the latest release (`CLAUDE_STATUSLINE_FORCE=1` reinstalls anyway).
+This downloads the latest release binary to `~/.local/bin/claude-statusline`, verifies its SHA-256, and sets `statusLine` in `~/.claude/settings.json` (an existing file is backed up next to it first). Re-run the same command to update or repair: the binary is only downloaded when it's missing, outdated or damaged (checked by SHA-256), and `statusLine` is checked and fixed in every config dir either way. `CLAUDE_STATUSLINE_FORCE=1` reinstalls regardless.
 
 Options go on `sh`, not on `curl`:
 
@@ -30,6 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/brannow/claude-statusline/main/inst
 | Variable | Default |
 |---|---|
 | `CLAUDE_CONFIG_DIR` | `~/.claude` |
+| `CLAUDE_STATUSLINE_CONFIG_DIRS` | several config dirs, colon-separated, e.g. `"~/.claude:~/.claude-work"` (wins over `CLAUDE_CONFIG_DIR`) |
 | `CLAUDE_STATUSLINE_INSTALL_DIR` | `~/.local/bin` |
 | `CLAUDE_STATUSLINE_VERSION` | latest release, e.g. `v0.2.0` |
 

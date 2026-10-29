@@ -5,8 +5,8 @@ A Rust binary that Claude Code invokes on each prompt to render a status bar. Cl
 ## Build & Install
 
 ```bash
-make install          # cargo build --release + cp to /usr/local/bin
-cargo test            # run unit tests
+make install          # dev build: cargo build --release + cp to /usr/local/bin
+make test             # cargo test + installer tests (tests/install_test.sh)
 ./target/release/claude-statusline          # demo mode (run from TTY)
 ./target/release/claude-statusline --debug  # dump raw JSON to /tmp/
 ```
@@ -19,6 +19,8 @@ Pushing a tag `vX.Y.Z` (must equal `Cargo.toml`'s version — CI fails otherwise
 - **Why `--configure` lives in the binary:** safe JSON editing from shell needs `jq`/`python3`, which aren't guaranteed. It writes through symlinks (settings.json is often a dotfiles link), refuses to touch unparseable JSON, keeps other `statusLine` fields (`padding`, `refreshInterval`), backs up first, and honors `CLAUDE_CONFIG_DIR`. serde_json's `preserve_order` keeps the user's key order.
 - **Why `--configure`/`--version` run before `catch_unwind`:** the statusline path swallows all errors by design; installer errors must surface as a non-zero exit.
 - **Why musl on Linux:** static binary, no glibc version coupling — runs on any distro.
+- **Why the up-to-date check compares SHA-256, not versions:** re-running the one-liner is the repair path. A hash match against the release's `SHA256SUMS` proves the binary is current *and* intact (not truncated, damaged, or the wrong arch); a version string can't. `statusLine` is re-checked in every config dir on every run (`CLAUDE_STATUSLINE_CONFIG_DIRS`, colon-separated), and one broken `settings.json` doesn't stop the others.
+- **Installer tests:** `tests/install_test.sh` runs `install.sh` against a fake `file://` release in a temp `HOME` (fresh install, every partial-install repair, multi-dir, checksum mismatch). Runs in `make test` and in CI on each native build. `SH=dash` checks Ubuntu's `/bin/sh` locally.
 - **Why `~/.local/bin`:** no sudo; `statusLine` gets an absolute path, so it doesn't need to be on `PATH`.
 
 ## Architecture

@@ -48,6 +48,10 @@ jobs:
           echo "$out"
           [ -n "$out" ]
 
+      - name: Installer tests
+        if: matrix.native
+        run: tests/install_test.sh target/${{ matrix.target }}/release/claude-statusline
+
       - run: cp target/${{ matrix.target }}/release/claude-statusline ${{ matrix.asset }}
 
       - uses: actions/upload-artifact@v7

@@ -6,14 +6,17 @@
 #
 # Environment (set it on `sh`, not on `curl`):
 #   CLAUDE_CONFIG_DIR              Claude Code config dir (default: ~/.claude)
+#   CLAUDE_STATUSLINE_CONFIG_DIRS  several config dirs, colon-separated, e.g.
+#                                  "~/.claude:~/.claude-work" (wins over CLAUDE_CONFIG_DIR)
 #   CLAUDE_STATUSLINE_INSTALL_DIR  where the binary goes (default: ~/.local/bin)
 #   CLAUDE_STATUSLINE_VERSION      release tag such as v0.2.0 (default: latest)
 #   CLAUDE_STATUSLINE_BASE_URL     download base URL, for mirrors or testing
 #   CLAUDE_STATUSLINE_BINARY       install this local file instead of downloading
 #   CLAUDE_STATUSLINE_FORCE=1      reinstall even if already up to date
 #
-# Re-running updates: if the installed binary already reports the target
-# release's version, the download is skipped (settings are still checked).
+# Re-running updates and repairs: the binary is downloaded only when it's
+# missing, outdated or damaged (checked by SHA-256), and statusLine is
+# checked and fixed in every config dir either way.
 #
 # Everything runs inside main(), called on the last line, so a download cut
 # off mid-script executes nothing. Child processes get </dev/null because
@@ -74,14 +77,16 @@ sha256() {
     fi
 }
 
-main() {
-    install_dir=${CLAUDE_STATUSLINE_INSTALL_DIR:-$HOME/.local/bin}
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
+# Put the release binary at $dest unless the installed one is already
+# byte-identical to it. Comparing SHA-256 rather than version strings also
+# repairs a binary that is damaged, truncated or built for the wrong arch.
+install_binary() {
+    dest="$install_dir/$BIN"
 
     if [ -n "${CLAUDE_STATUSLINE_BINARY:-}" ]; then
         cp "$CLAUDE_STATUSLINE_BINARY" "$tmp/$BIN"
     else
+        has sha256sum || has shasum || err "sha256sum or shasum is required to verify the download"
         asset=$(detect_asset)
         if [ -n "${CLAUDE_STATUSLINE_VERSION:-}" ]; then
             base="https://github.com/$REPO/releases/download/$CLAUDE_STATUSLINE_VERSION"
@@ -90,28 +95,25 @@ main() {
         fi
         base=${CLAUDE_STATUSLINE_BASE_URL:-$base}
 
+        download "$base/SHA256SUMS" "$tmp/SHA256SUMS"
         download "$base/VERSION" "$tmp/VERSION"
         target=$(tr -d ' \r\n' <"$tmp/VERSION")
-        # Binaries older than --version print nothing here, which counts as outdated.
-        installed=""
-        if [ -x "$install_dir/$BIN" ]; then
-            installed=$("$install_dir/$BIN" --version </dev/null 2>/dev/null | awk '{ print $2 }') || installed=""
-        fi
-        if [ -n "$target" ] && [ "$installed" = "$target" ] && [ "${CLAUDE_STATUSLINE_FORCE:-}" != 1 ]; then
-            echo "claude-statusline $installed is up to date ($install_dir/$BIN)"
-            "$install_dir/$BIN" --configure </dev/null
+        expected=$(awk -v f="$asset" '$2 == f { print $1 }' "$tmp/SHA256SUMS")
+        [ -n "$expected" ] || err "$asset not listed in SHA256SUMS"
+
+        if [ -f "$dest" ] && [ -x "$dest" ] && [ "$(sha256 "$dest")" = "$expected" ] &&
+            [ "${CLAUDE_STATUSLINE_FORCE:-}" != 1 ]; then
+            echo "claude-statusline $target is up to date ($dest)"
             return 0
         fi
-        if [ -n "$installed" ]; then
-            echo "Updating claude-statusline $installed -> $target"
+        if [ -e "$dest" ]; then
+            # Binaries older than --version, or damaged ones, print nothing here.
+            installed=$("$dest" --version </dev/null 2>/dev/null | awk '{ print $2 }') || installed=""
+            echo "Updating claude-statusline ${installed:-(unknown or damaged)} -> $target"
         fi
 
         echo "Downloading $asset ..."
         download "$base/$asset" "$tmp/$BIN"
-        download "$base/SHA256SUMS" "$tmp/SHA256SUMS"
-
-        expected=$(awk -v f="$asset" '$2 == f { print $1 }' "$tmp/SHA256SUMS")
-        [ -n "$expected" ] || err "$asset not listed in SHA256SUMS"
         actual=$(sha256 "$tmp/$BIN")
         [ "$expected" = "$actual" ] || err "checksum mismatch for $asset"
     fi
@@ -121,10 +123,40 @@ main() {
     # Rename into place: overwriting a running binary in place fails on
     # Linux ("text file busy") and would break a live statusline.
     mv "$tmp/$BIN" "$install_dir/.$BIN.new"
-    mv -f "$install_dir/.$BIN.new" "$install_dir/$BIN"
+    mv -f "$install_dir/.$BIN.new" "$dest"
+    echo "Installed $("$dest" --version </dev/null) to $dest"
+}
 
-    echo "Installed $("$install_dir/$BIN" --version </dev/null) to $install_dir/$BIN"
-    "$install_dir/$BIN" --configure </dev/null
+# Point statusLine at $dest in every config dir. Runs on every install, so a
+# missing or stale settings entry is repaired even when the binary was fine.
+# One broken settings.json doesn't stop the other dirs from being configured.
+configure_all() {
+    dirs=${CLAUDE_STATUSLINE_CONFIG_DIRS:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}
+    failed=0
+    old_ifs=$IFS
+    IFS=:
+    set -f
+    for d in $dirs; do
+        IFS=$old_ifs
+        [ -n "$d" ] || continue
+        case $d in
+            "~") d=$HOME ;;
+            "~/"*) d=$HOME/${d#"~/"} ;;
+        esac
+        CLAUDE_CONFIG_DIR=$d "$dest" --configure </dev/null || failed=1
+    done
+    IFS=$old_ifs
+    set +f
+    [ "$failed" = 0 ] || err "some config dirs were not updated (see above); fix them and re-run"
+}
+
+main() {
+    install_dir=${CLAUDE_STATUSLINE_INSTALL_DIR:-$HOME/.local/bin}
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+
+    install_binary
+    configure_all
     echo "Done. The statusline appears on your next Claude Code prompt."
 }
 
