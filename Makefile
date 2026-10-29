@@ -9,8 +9,8 @@ install: build
 	cp target/release/$(BINARY) /usr/local/bin/$(BINARY)
 	@echo "Installed to /usr/local/bin/$(BINARY)"
 
-test: build
-	@bash test.sh
+test:
+	cargo test
 
 clean:
 	cargo clean
