@@ -61,9 +61,9 @@ If installed to a non-standard path, use the full path instead.
 
 ## Features
 
-**Line 1** — model name, directory, git branch + status (staged/modified/untracked), agent name, permission mode
+**Line 1** — model name (with reasoning effort, e.g. `Sonnet 5 (xhigh)`, when Claude Code reports one), directory, git branch + status (staged/modified/untracked), agent name, permission mode
 
-**Line 2** — session duration, context window gauge (adjusted for autocompact buffer), total cost
+**Line 2** — session duration, context window gauge (adjusted for autocompact buffer), total cost (DeepSeek sessions are priced from the transcript's token usage at DeepSeek rates, since Claude Code's own total assumes Anthropic pricing)
 
 **Line 3** *(optional)* — usage bars with percentage and reset countdown: 5h and 7d always, plus any other limit window Anthropic reports (e.g. a per-model weekly limit) once it is above 0%. Shown only when `rate_limits` is present in Claude Code's stdin JSON (requires Claude Code ≥ v2.1.80). A value written `~5%` comes from Claude Code's last usage snapshot and is more than an hour old — open `/usage` to refresh it.
 

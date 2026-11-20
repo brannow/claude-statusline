@@ -35,6 +35,7 @@ src/
   color.rs     Rgb type, 12-color palette, threshold colors
   git.rs       Git branch/status fetch with 5s cache and 500ms timeout
   usage.rs     Extra limit bars from Claude Code's usage snapshot + reset countdowns
+  pricing.rs   DeepSeek session cost: transcript token usage × DeepSeek rates (memo in /tmp)
   setup.rs     --configure: write statusLine into settings.json (used by install.sh)
   icons.rs     Unicode constants (edges, bar chars) — no Nerd Fonts needed
   platform.rs  Pure-Rust SHA-256 (used for cache keys and palette hashing)
@@ -97,6 +98,7 @@ Each line now has a stable, narrow minimum width, so all three lines survive at 
 {
   "cwd": "/path/to/project",
   "session_id": "...",
+  "transcript_path": "/path/to/session.jsonl",
   "model": { "id": "claude-opus-4-6", "display_name": "Opus" },
   "cost": {
     "total_cost_usd": 1.37,
