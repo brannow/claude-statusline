@@ -5,7 +5,8 @@ A Rust binary that Claude Code invokes on each prompt to render a status bar. Cl
 ## Build & Install
 
 ```bash
-make install          # dev build: cargo build --release + cp to /usr/local/bin
+make install          # dev build: cargo build --release + install to ~/.local/bin
+make install INSTALL_DIR=/usr/local/bin   # …or anywhere else
 make test             # cargo test + installer tests (tests/install_test.sh)
 ./target/release/claude-statusline          # demo mode (run from TTY)
 ./target/release/claude-statusline --debug  # dump raw JSON to /tmp/
@@ -22,6 +23,7 @@ Pushing a tag `vX.Y.Z` (must equal `Cargo.toml`'s version — CI fails otherwise
 - **Why the up-to-date check compares SHA-256, not versions:** re-running the one-liner is the repair path. A hash match against the release's `SHA256SUMS` proves the binary is current *and* intact (not truncated, damaged, or the wrong arch); a version string can't. `statusLine` is re-checked in every config dir on every run (`CLAUDE_STATUSLINE_CONFIG_DIRS`, colon-separated), and one broken `settings.json` doesn't stop the others.
 - **Installer tests:** `tests/install_test.sh` runs `install.sh` against a fake `file://` release in a temp `HOME` (fresh install, every partial-install repair, multi-dir, checksum mismatch). Runs in `make test` and in CI on each native build. `SH=dash` checks Ubuntu's `/bin/sh` locally.
 - **Why `~/.local/bin`:** no sudo; `statusLine` gets an absolute path, so it doesn't need to be on `PATH`.
+- **Why `make install` uses the same dir (and `CLAUDE_STATUSLINE_INSTALL_DIR`):** it used to copy to `/usr/local/bin` while `statusLine` pointed at the installer's `~/.local/bin`, so a dev build silently never ran. Note the installer's SHA check treats a dev build as "damaged" and restores the release on its next run.
 
 ## Architecture
 

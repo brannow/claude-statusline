@@ -42,7 +42,7 @@ To only (re)point an already installed binary at a config dir: `claude-statuslin
 make install
 ```
 
-Installs to `/usr/local/bin/claude-statusline`.
+Installs to `~/.local/bin/claude-statusline` — the same place the one-line installer uses, so a source build replaces an installed release. Somewhere else: `make install INSTALL_DIR=/usr/local/bin` (or set `CLAUDE_STATUSLINE_INSTALL_DIR`). Re-running the one-line installer puts the released binary back.
 
 ## Configure Claude Code manually
 
@@ -52,7 +52,7 @@ Add to `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "/usr/local/bin/claude-statusline"
+    "command": "~/.local/bin/claude-statusline"
   }
 }
 ```
