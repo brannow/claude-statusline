@@ -32,7 +32,7 @@ src/
   render.rs    Build the 3 output lines from parsed input
   color.rs     Rgb type, 12-color palette, threshold colors
   git.rs       Git branch/status fetch with 5s cache and 500ms timeout
-  usage.rs     format_time_until() helper for reset countdowns
+  usage.rs     Extra limit bars from Claude Code's usage snapshot + reset countdowns
   setup.rs     --configure: write statusLine into settings.json (used by install.sh)
   icons.rs     Unicode constants (edges, bar chars) — no Nerd Fonts needed
   platform.rs  Pure-Rust SHA-256 (used for cache keys and palette hashing)
@@ -41,6 +41,24 @@ src/
 ### Why stdin instead of API polling for rate limits
 
 Claude Code v2.1.80 added `rate_limits` to the statusLine JSON payload, delivering 5h/7d usage data directly without any HTTP requests. The previous approach used OAuth token lookups + the Anthropic API, which required keychain access, an HTTP client (`ureq`), and a 3-tier cache to avoid hammering the API. All of that is gone — the stdin approach is simpler, faster, and works without any credentials.
+
+### Line 3 is an open list of limit windows, fed by two sources
+
+Anthropic adds limit windows without notice (per-model weekly buckets like "Current week (Fable)", gateway spend limits), so nothing on Line 3 is hard-coded to 5h/7d. Every window becomes a `LimitBar`; **5h and 7d are always shown, every other window only once it rounds to ≥ 1%** — most accounts sit at 0% on most of them, and a permanently empty bar is noise.
+
+**Source 1 — stdin `rate_limits` (live).** Parsed as an open map, not named fields, so a key Claude Code starts sending tomorrow renders without a release. Its label is derived from the key (`seven_day_opus` → `7d opus`). Entries are read leniently (anything without a numeric `used_percentage` is skipped) because a strict parse would let one unexpected value fail the whole payload and blank the statusline.
+
+**Source 2 — the usage snapshot in `.claude.json` (not live).** Verified against Claude Code 2.1.329: the statusLine payload only ever carries `five_hour`, `seven_day` and, on gateways, `spend_limit`. The per-model windows that `/usage` shows never reach stdin. They exist in exactly one place we can read without credentials: `cachedUsageUtilization.utilization.limits[]` in `$CLAUDE_CONFIG_DIR/.claude.json` (fallback `~/.claude.json`), which is what the `/usage` dialog itself renders from. Reading it keeps the "no keychain, no HTTP" property above; calling the usage endpoint ourselves would bring all of that back.
+
+That snapshot is only rewritten when Claude Code fetches the usage endpoint (e.g. opening `/usage`) — *not* on every response. Everything about how it is used follows from that:
+
+- **stdin stays authoritative for 5h/7d.** The snapshot's `session` / `weekly_all` entries are ignored; they are older copies of the same windows.
+- **`~5%` marks a snapshot older than 1 hour** — the age at which Claude Code stops trusting it itself. We keep showing it (a weekly window moves slowly, and a hidden bar tells you less than an approximate one); opening `/usage` refreshes it.
+- **Dropped when `resets_at` has passed** — the number belongs to the previous window — **or when the snapshot's `accountUuid` differs from `oauthAccount`** (left over from another login).
+- **Never opens Line 3 on its own.** Without live stdin data there would be a lone, possibly stale bar with no 5h/7d beside it.
+- **Undocumented internal format.** Every field is read leniently and any surprise yields no extra bars — the feature degrades to plain 5h/7d, never to an error. Labels are server-supplied text printed to a terminal, so control characters are stripped and length is capped.
+
+If Claude Code ever forwards these windows on stdin, Source 1 picks them up live with no code change; the same window may then appear twice (once per source) until Source 2 is retired.
 
 ### Why no `libc` crate
 
@@ -57,6 +75,8 @@ Git is cached per-cwd in a single flat file at `/tmp/claude-statusline-cache` (k
 ### Responsive layout
 
 Each line builds a list of segments, then `render_segments` fills them left-to-right until one won't fit, then stops. Segments at the end of the list are therefore dropped first on narrow terminals.
+
+Line 3 gets one extra step first, because its segment count is not fixed: all bars shrink together (15 → 10 → 6 cells → percentage only) until the line fits. A third or fourth window should cost bar resolution, not push a whole window off an 80-column terminal.
 
 ### Why the layout is split across three lines (not two)
 
@@ -97,7 +117,7 @@ Each line now has a stable, narrow minimum width, so all three lines survive at 
 }
 ```
 
-`rate_limits` requires Claude Code ≥ v2.1.80. Absent fields are handled gracefully — the corresponding UI element is omitted.
+`rate_limits` requires Claude Code ≥ v2.1.80. Absent fields are handled gracefully — the corresponding UI element is omitted. `five_hour` / `seven_day` are just the keys known today: any other key holding `{ "used_percentage": … }` is rendered too (see "Line 3 is an open list of limit windows").
 
 ### Reasoning effort on Line 1
 

@@ -2,18 +2,27 @@ use crate::color::{self, Palette, Rgb, L2_BG, L2_DIM, L2_TXT, RST};
 use crate::git::GitInfo;
 use crate::icons::*;
 use crate::input::{Input, RateLimits};
+use crate::usage::LimitBar;
 
 /// Returns 2 or 3 lines depending on whether rate limits are available.
 /// Line 1: Model, project dir, git branch+status (acts as spacer for Claude Code overlay)
 /// Line 2: Duration, context bar, cost, lines changed
-/// Line 3 (optional): 5h and 7d usage bars
-pub fn render(input: &Input, git: &GitInfo, palette: &Palette, cols: u16, rate_limits: Option<&RateLimits>) -> Vec<String> {
+/// Line 3 (optional): usage bars — 5h, 7d, plus any other window with usage.
+///   `cached_limits` are the windows Claude Code doesn't send on stdin.
+pub fn render(
+    input: &Input,
+    git: &GitInfo,
+    palette: &Palette,
+    cols: u16,
+    rate_limits: Option<&RateLimits>,
+    cached_limits: &[LimitBar],
+) -> Vec<String> {
     let cols = cols as usize;
     let inner_width = if cols > 2 { cols - 2 } else { cols };
 
     let line1 = build_line1(input, git, palette, inner_width);
     let line2 = build_line2(input, inner_width);
-    let line3 = build_line3(inner_width, rate_limits);
+    let line3 = build_line3(inner_width, rate_limits, cached_limits);
 
     let mut lines = Vec::new();
 
@@ -171,43 +180,99 @@ fn build_line2(input: &Input, max_width: usize) -> String {
 
 // ── Line 3: Usage limits (subscription only) ────────────────────────────────
 
-fn build_line3(max_width: usize, rate_limits: Option<&RateLimits>) -> Option<String> {
-    let limits = rate_limits?;
+/// Bar widths to try, widest first; 0 means label + percentage only.
+const LIMIT_BAR_WIDTHS: [u64; 4] = [15, 10, 6, 0];
 
-    // Need at least 5h data to show this line
-    let five = limits.five_hour.as_ref()?;
-    let five_pct = five.used_percentage?;
+fn build_line3(max_width: usize, rate_limits: Option<&RateLimits>, cached_limits: &[LimitBar]) -> Option<String> {
+    let bars = limit_bars(rate_limits?, cached_limits);
+    if bars.is_empty() {
+        return None;
+    }
 
+    // Shrink all bars together until the line fits: an extra window should
+    // cost bar resolution, not knock a whole segment off a narrow terminal.
+    let mut segments = Vec::new();
+    for bar_width in LIMIT_BAR_WIDTHS {
+        segments = bars.iter().map(|bar| limit_segment(bar, bar_width)).collect();
+        if segments_width(&segments) <= max_width {
+            break;
+        }
+    }
+
+    Some(render_segments(&segments, max_width, &L2_BG.bg(), &L2_DIM.fg()))
+}
+
+/// 5h and 7d are always shown; every other window only once it has usage —
+/// most accounts sit at 0% on most of them, and an empty bar is just noise.
+fn limit_bars(limits: &RateLimits, cached_limits: &[LimitBar]) -> Vec<LimitBar> {
+    let rank = |key: &str| match key {
+        "five_hour" => 0,
+        "seven_day" => 1,
+        _ => 2,
+    };
+    let mut windows: Vec<_> = limits.0.iter().collect();
+    windows.sort_by_key(|(key, _)| rank(key)); // stable: the rest keep payload order
+
+    let mut bars: Vec<LimitBar> = windows
+        .into_iter()
+        .filter_map(|(key, window)| {
+            let pct = window.used_percentage.round() as u64;
+            if rank(key) == 2 && pct == 0 {
+                return None;
+            }
+            Some(LimitBar {
+                label: window_label(key),
+                pct,
+                resets_at: window.resets_at,
+                stale: false,
+            })
+        })
+        .collect();
+
+    // The snapshot never opens Line 3 on its own: without live data from
+    // stdin there'd be a lone, possibly stale bar and no 5h/7d beside it.
+    if !bars.is_empty() {
+        bars.extend(cached_limits.iter().cloned());
+    }
+    bars
+}
+
+/// `five_hour` → `5h`, `seven_day_opus` → `7d opus`, `spend_limit` → `spend limit`.
+/// Unknown keys can't have a hand-picked label, so the key itself has to do.
+fn window_label(key: &str) -> String {
+    let label = key.replace("five_hour", "5h").replace("seven_day", "7d").replace('_', " ");
+    crate::usage::clean_label(&label)
+}
+
+fn limit_segment(bar: &LimitBar, bar_width: u64) -> String {
     let bg = L2_BG.bg();
     let txt = L2_TXT.fg();
     let dim = L2_DIM.fg();
 
-    let mut segments: Vec<String> = Vec::new();
+    let clr = color::pct_color(bar.pct);
+    let clr_fg = clr.fg();
+    let gauge = if bar_width > 0 {
+        format!("{} ", make_bar(bar.pct, bar_width, &clr, &L2_DIM))
+    } else {
+        String::new()
+    };
+    let approx = if bar.stale { "~" } else { "" };
+    let reset = crate::usage::format_time_until(bar.resets_at);
 
-    // 5h usage
-    let fp = five_pct.round() as u64;
-    let fc = color::pct_color(fp);
-    let fc_fg = fc.fg();
-    let fr = crate::usage::format_time_until(five.resets_at);
-    let bar5 = make_bar(fp, 15, &fc, &L2_DIM);
-    segments.push(format!("{txt}5h{RST}{bg} {bar5} {fc_fg}{fp}%{RST}{bg} {dim}{fr}{RST}{bg}"));
-
-    // 7d usage (omit if absent)
-    if let Some(seven) = &limits.seven_day {
-        if let Some(seven_pct) = seven.used_percentage {
-            let sp = seven_pct.round() as u64;
-            let sc = color::pct_color(sp);
-            let sc_fg = sc.fg();
-            let sr = crate::usage::format_time_until(seven.resets_at);
-            let bar7 = make_bar(sp, 15, &sc, &L2_DIM);
-            segments.push(format!("{txt}7d{RST}{bg} {bar7} {sc_fg}{sp}%{RST}{bg} {dim}{sr}{RST}{bg}"));
-        }
-    }
-
-    Some(render_segments(&segments, max_width, &bg, &dim))
+    format!(
+        "{txt}{label}{RST}{bg} {gauge}{clr_fg}{approx}{pct}%{RST}{bg} {dim}{reset}{RST}{bg}",
+        label = bar.label,
+        pct = bar.pct,
+    )
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
+
+/// Columns `render_segments` needs to show every segment.
+fn segments_width(segments: &[String]) -> usize {
+    let content: usize = segments.iter().map(|s| visible_width(s)).sum();
+    content + 1 + 3 * segments.len().saturating_sub(1) // leading space + separators
+}
 
 /// Simple left-to-right rendering: segments separated by │, padded with spaces.
 /// No flex, no proportional distribution — just natural widths.
@@ -258,4 +323,103 @@ fn visible_width(s: &str) -> usize {
         width += 1;
     }
     width
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limits(json: &str) -> RateLimits {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// Two days out, so countdowns have a realistic width (`2d0h`).
+    fn reset() -> u64 {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        now + 172_830
+    }
+
+    fn fable(stale: bool) -> LimitBar {
+        LimitBar { label: "7d Fable".into(), pct: 5, resets_at: Some(reset()), stale }
+    }
+
+    /// What stdin carries today: the two live windows.
+    fn base() -> RateLimits {
+        let reset = reset();
+        limits(&format!(
+            r#"{{ "five_hour": {{ "used_percentage": 18, "resets_at": {reset} }},
+                 "seven_day": {{ "used_percentage": 34, "resets_at": {reset} }} }}"#
+        ))
+    }
+
+    /// The line as the terminal shows it: escape sequences removed.
+    fn plain(line: &str) -> String {
+        let mut out = String::new();
+        let mut in_escape = false;
+        for c in line.chars() {
+            if in_escape { if c.is_ascii_alphabetic() { in_escape = false; } continue; }
+            if c == '\x1b' { in_escape = true; continue; }
+            out.push(c);
+        }
+        out
+    }
+
+    fn bar_cells(line: &str) -> usize {
+        line.matches(BAR_FILLED).count() + line.matches(BAR_EMPTY).count()
+    }
+
+    #[test]
+    fn base_windows_show_at_zero_other_windows_only_with_usage() {
+        let limits = limits(
+            r#"{ "seven_day_opus": { "used_percentage": 0 },
+                 "spend_limit": { "used_percentage": 12.4 },
+                 "seven_day": { "used_percentage": 0 },
+                 "five_hour": { "used_percentage": 0 } }"#,
+        );
+        let line = plain(&build_line3(200, Some(&limits), &[]).unwrap());
+
+        let (five, seven, spend) = (line.find("5h ").unwrap(), line.find("7d ").unwrap(), line.find("spend limit ").unwrap());
+        assert!(five < seven && seven < spend, "5h, 7d, then the rest: {line}");
+        assert!(line.contains("12%"), "{line}");
+        assert!(!line.contains("opus"), "{line}");
+    }
+
+    #[test]
+    fn cached_windows_follow_the_live_ones() {
+        let line = plain(&build_line3(200, Some(&base()), &[fable(false)]).unwrap());
+        assert!(line.contains("34%"), "{line}");
+        assert!(line.contains("7d Fable"), "{line}");
+        assert!(line.contains(" 5% "), "{line}");
+        assert_eq!(bar_cells(&line), 45, "three full-width bars: {line}");
+    }
+
+    #[test]
+    fn stale_snapshot_values_are_marked() {
+        let line = plain(&build_line3(200, Some(&base()), &[fable(true)]).unwrap());
+        assert!(line.contains("~5%"), "{line}");
+        assert!(line.contains(" 34%"), "live values stay unmarked: {line}");
+    }
+
+    #[test]
+    fn snapshot_alone_does_not_open_the_line() {
+        assert!(build_line3(200, None, &[fable(false)]).is_none());
+        assert!(build_line3(200, Some(&limits("{}")), &[fable(false)]).is_none());
+    }
+
+    #[test]
+    fn bars_shrink_before_a_window_is_dropped() {
+        let limits = base();
+        let cached = [fable(false)];
+
+        // 78 = inner width of an 80-column terminal.
+        let narrow = plain(&build_line3(78, Some(&limits), &cached).unwrap());
+        assert!(narrow.contains("7d Fable"), "{narrow}");
+        assert!(narrow.chars().count() <= 78, "{narrow}");
+        assert!(bar_cells(&narrow) < 45, "{narrow}");
+
+        // Too narrow even for bars: percentages only, all three still there.
+        let tiny = plain(&build_line3(50, Some(&limits), &cached).unwrap());
+        assert_eq!(bar_cells(&tiny), 0, "{tiny}");
+        assert!(tiny.contains("18%") && tiny.contains("34%") && tiny.contains("7d Fable 5%"), "{tiny}");
+    }
 }

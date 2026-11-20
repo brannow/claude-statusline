@@ -67,8 +67,18 @@ fn run() {
     // Terminal width
     let cols = terminal_width();
 
+    // Limit windows that aren't in the stdin payload. Only subscription
+    // sessions have limit bars at all, so skip the file read otherwise.
+    let cached_limits = if is_tty {
+        demo_cached_limits()
+    } else if input.rate_limits.is_some() {
+        usage::load_cached_limits()
+    } else {
+        Vec::new()
+    };
+
     // Render and print
-    let lines = render::render(&input, &git, &palette, cols, input.rate_limits.as_ref());
+    let lines = render::render(&input, &git, &palette, cols, input.rate_limits.as_ref(), &cached_limits);
     for (i, line) in lines.iter().enumerate() {
         let is_last = i == lines.len() - 1;
         if is_last && !is_tty {
@@ -133,6 +143,22 @@ fn dump_debug(raw_json: &Option<String>, input: &input::Input) {
     }
 }
 
+fn demo_epoch_in(secs: u64) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() + secs)
+        .unwrap_or(0)
+}
+
+fn demo_cached_limits() -> Vec<usage::LimitBar> {
+    vec![usage::LimitBar {
+        label: "7d Fable".into(),
+        pct: 5,
+        resets_at: Some(demo_epoch_in(172_800)),
+        stale: true,
+    }]
+}
+
 fn demo_input() -> input::Input {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -160,26 +186,22 @@ fn demo_input() -> input::Input {
             remaining_percentage: Some(58.0),
             current_usage: None,
         }),
-        rate_limits: Some(input::RateLimits {
-            five_hour: Some(input::RateLimitWindow {
-                used_percentage: Some(42.0),
-                resets_at: Some(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() + 7200) // 2h from now
-                        .unwrap_or(0),
-                ),
-            }),
-            seven_day: Some(input::RateLimitWindow {
-                used_percentage: Some(73.0),
-                resets_at: Some(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() + 172800) // 2d from now
-                        .unwrap_or(0),
-                ),
-            }),
-        }),
+        rate_limits: Some(input::RateLimits(vec![
+            (
+                "five_hour".into(),
+                input::RateLimitWindow {
+                    used_percentage: 42.0,
+                    resets_at: Some(demo_epoch_in(7200)), // 2h from now
+                },
+            ),
+            (
+                "seven_day".into(),
+                input::RateLimitWindow {
+                    used_percentage: 73.0,
+                    resets_at: Some(demo_epoch_in(172_800)), // 2d from now
+                },
+            ),
+        ])),
         ..Default::default()
     }
 }

@@ -65,15 +65,16 @@ If installed to a non-standard path, use the full path instead.
 
 **Line 2** — session duration, context window gauge (adjusted for autocompact buffer), total cost
 
-**Line 3** *(optional)* — 5h and 7d usage bars with percentage and reset countdown. Shown only when `rate_limits` is present in Claude Code's stdin JSON (requires Claude Code ≥ v2.1.80).
+**Line 3** *(optional)* — usage bars with percentage and reset countdown: 5h and 7d always, plus any other limit window Anthropic reports (e.g. a per-model weekly limit) once it is above 0%. Shown only when `rate_limits` is present in Claude Code's stdin JSON (requires Claude Code ≥ v2.1.80). A value written `~5%` comes from Claude Code's last usage snapshot and is more than an hour old — open `/usage` to refresh it.
 
-Segments are dropped right-to-left when the terminal is too narrow to fit them all.
+Segments are dropped right-to-left when the terminal is too narrow to fit them all. On Line 3 the bars shrink first (down to percentage only), so an extra limit window doesn't push another one off the line.
 
 No Nerd Fonts or Powerline glyphs required — uses standard Unicode only (▐ ▌ ▰ ▱).
 
 ### Edge cases handled
 
 - **Accounts without 7-day limits** — Some subscription tiers only have a 5-hour window. The 7d bar is simply omitted when absent.
+- **Limit windows beyond 5h/7d** — Claude Code only sends the 5h and 7d windows to the statusline. Others (e.g. the per-model weekly limit shown in `/usage`) are read from the usage snapshot Claude Code keeps in `.claude.json` in its config dir. The file is only read, never written, and nothing leaves your machine. Claude Code refreshes that snapshot when it fetches usage (e.g. when you open `/usage`), so these bars can lag behind the live 5h/7d values; a window that has already reset is hidden.
 - **Context window accuracy** — The gauge subtracts Claude Code's ~33k autocompact buffer, showing percentage of *usable* capacity. 100% means autocompact will trigger.
 - **Git timeout protection** — Git runs in a separate thread with a 500ms timeout and results are cached for 5s. Slow repos (large monorepos, network mounts) won't block the statusline.
 - **Crash resilience** — The entire `run()` is wrapped in `catch_unwind`. A statusline must never crash the host terminal.
